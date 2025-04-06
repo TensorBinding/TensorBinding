@@ -1,14 +1,70 @@
-# -*- coding: utf-8 -*-
-using ITensors: MPO, MPS, OpSum, expect, inner, siteinds
-using ITensors
-using ITensorMPS
-using LinearAlgebra
-using Plots
-using QuanticsTCI
-import TensorCrossInterpolation as TCI
-using Quantics
-using StatsBase
-using Base.Threads
+function SCF_Hubbard(L,
+    sites, 
+    U, 
+    k_mpo,
+    max_iter, 
+    N,  
+    threshold,
+    mpo_guess_up,
+    mpo_guess_down,
+    mps_guess_up,
+    mps_guess_down,
+    qtt_den_old_up,
+    qtt_den_old_down,
+    mix)
+      
+    initial_u_up = U *  mpo_guess_up
+    initial_u_down = U *  mpo_guess_down
+    ham_up = +(k_mpo , initial_u_down, - U/(2*L) * Id_op;  cutoff = 1e-8 )
+    ham_down = +(k_mpo , initial_u_up, - U/(2*L) * Id_op ;  cutoff = 1e-8)
+   
+
+    conv_error = []
+    
+    for i in 1:max_iter
+        
+        Tn_list_up  = KPM_Tn(ham_up,N)
+        Tn_list_down = KPM_Tn(ham_down,N)
+      
+        A_up = get_density_from_Tn(Tn_list_up,N)
+        A_down = get_density_from_Tn(Tn_list_down,N)
+         
+        qtt_den_new_up, den_mpo_up,den_mps_up = get_density_quantics(A_up,L)
+        qtt_den_new_down, den_mpo_down,den_mps_down  = get_density_quantics(A_down,L)
+
+        diff_up = norm(den_mps_up - mps_guess_up)/(norm(Id_op)/L)
+        diff_down = norm(den_mps_down -  mps_guess_down)/(norm(Id_op)/L)
+
+        max_diff = (diff_up + diff_down)/2
+        push!(conv_error, max_diff)
+
+        # Check convergence
+        if max_diff < threshold
+            println("SCF converged in $(i) iterations.")
+            return qtt_den_new_up, qtt_den_new_down, Tn_list_up, Tn_list_down, conv_error
+        end
+        
+        den_mpo_up_new = mix * den_mpo_up + (1-mix) * mpo_guess_up
+        den_mpo_down_new = mix * den_mpo_down + (1-mix) * mpo_guess_down
+        den_mps_up_new = mix * den_mps_up + (1-mix) * mps_guess_up
+        den_mps_down_new = mix * den_mps_down + (1-mix) * mps_guess_down
+        
+        ham_up = ITensorMPS.truncate!(+(k_mpo  , U *  den_mpo_down_new ,- U/(2*L) * Id_op ;  cutoff = 1e-8);maxdim=100)
+        ham_down = ITensorMPS.truncate!(+(k_mpo ,  U *  den_mpo_up_new  , - U/(2*L) * Id_op ;  cutoff = 1e-8);maxdim=100)
+
+        mpo_guess_up = den_mpo_up_new
+        mpo_guess_down = den_mpo_down_new
+        mps_guess_up = den_mps_up_new
+        mps_guess_down = den_mps_down_new
+        
+        qtt_den_old_up = qtt_den_new_up
+        qtt_den_old_down = qtt_den_new_down
+       
+        
+    end
+    println("SCF can't converged.")
+    return qtt_den_new_up,qtt_den_new_down, conv_error 
+end
 
 function get_error_plot(conv_error)
  
@@ -28,9 +84,6 @@ function get_error_plot(conv_error)
     )
 end
 
-"""
-For random vectors used for stochastic tracing
-"""
 function slice_edges(L, n)
     step = round(Int, L / n)  # Round L/n to the nearest integer
     edges = [(i * step) for i in 0:(L - 1) ÷ step]  # Calculate edges
@@ -232,7 +285,7 @@ function get_ldos(mus_up, mus_down, num_frag,en_num)
     ldos_matrix = ldos_matrix_up + ldos_matrix_down 
 
     nor = maximum(ldos_matrix) 
-    ldos_matrix= ldos_matrix/nor#normalize
+    ldos_matrix=  10.*(ldos_matrix/nor)#normalize
     #plot ldos
     
     quantity = floor(log10(2^(L - 1)))
@@ -256,7 +309,7 @@ function get_ldos(mus_up, mus_down, num_frag,en_num)
     plot(size=(800, 400))
     p = contourf(
         xvals,
-        yvals .* 10,
+        yvals ,
         real.(ldos_matrix),
         xlabel="site",
         ylabel="Energy",
