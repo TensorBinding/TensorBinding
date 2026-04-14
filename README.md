@@ -31,7 +31,7 @@ Both reduce a system of *2<sup>L</sup>* sites to an effective *L*-site pseudo-sp
 - Real- and imaginary-time evolution via the TDVP algorithm
 
 ✅ **Purification**  
-- Finite-temperature density matrix purification
+- Density matrix calculations using purification
 
 ---
 
