@@ -19,7 +19,6 @@ export MPO, MPS, OpSum, expect, inner, siteinds
 
 # Load order matters:
 #   utils.jl      — binary/index helpers, diagonal MPO construction (no deps)
-#   Geometry.jl   — Python geometry helper (no Julia deps)
 #   Hamiltonian.jl — hopping MPO builders (uses utils)
 #   2D_lattice.jl  — 2D shift operators and lattice hoppings (uses utils, Hamiltonian)
 #   QFT_tk.jl      — QFT conjugation (uses utils)
@@ -32,7 +31,6 @@ export MPO, MPS, OpSum, expect, inner, siteinds
 #   Timeev_tk.jl   — time evolution (uses Hamiltonian)
 
 include("utils.jl")
-include("Geometry.jl")
 include("Hamiltonian.jl")
 include("2D_lattice.jl")
 include("QFT_tk.jl")

@@ -1,10 +1,10 @@
 **TensorBinding.jl**  
 *Compressing Condensed Matter Problems with Tensor Networks*
 
-[![Stable](https://img.shields.io/badge/docs-stable-blue.svg)](https://YITAOSUN42.github.io/TensorBinding.jl/stable/)
-[![Dev](https://img.shields.io/badge/docs-dev-blue.svg)](https://YITAOSUN42.github.io/TensorBinding.jl/dev/)
-[![Build Status](https://github.com/YITAOSUN42/TensorBinding.jl/actions/workflows/CI.yml/badge.svg?branch=master)](https://github.com/YITAOSUN42/TensorBinding.jl/actions/workflows/CI.yml?query=branch%3Amaster)
-[![Coverage](https://codecov.io/gh/YITAOSUN42/TensorBinding.jl/branch/master/graph/badge.svg)](https://codecov.io/gh/YITAOSUN42/TensorBinding.jl)
+[![Stable](https://img.shields.io/badge/docs-stable-blue.svg)](https://TiagoAntao2.github.io/TensorBinding/stable/)
+[![Dev](https://img.shields.io/badge/docs-dev-blue.svg)](https://TiagoAntao2.github.io/TensorBinding/dev/)
+[![Build Status](https://github.com/TiagoAntao2/TensorBinding/actions/workflows/CI.yml/badge.svg?branch=master)](https://github.com/TiagoAntao2/TensorBinding/actions/workflows/CI.yml?query=branch%3Amaster)
+[![Coverage](https://codecov.io/gh/TiagoAntao2/TensorBinding/branch/master/graph/badge.svg)](https://codecov.io/gh/TiagoAntao2/TensorBinding)
  
 **TensorBinding.jl** is a Julia package for solving condensed matter physics problems using tensor network methods. At its core, it applies the **Quantics Tensor Cross Interpolation (QTCI)** algorithm to achieve exponential compression of quantum systems:  
 - Converts matrix-form tight-binding Hamiltonians into compressed **Matrix Product Operator (MPO)** representations  
