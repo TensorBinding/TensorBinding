@@ -379,6 +379,276 @@ end
 
 
 # ============================================================
+# _von_neumann_rhs
+# Compute dρ/dt = -i[H, ρ] = -i(Hρ - ρH) for a density matrix MPO.
+# Both Hρ and ρH are truncated immediately to control bond growth.
+# ============================================================
+function _von_neumann_rhs(H::MPO, ρ::MPO; maxdim::Int, cutoff::Float64)
+    Hρ   = apply(H, ρ; maxdim=maxdim, cutoff=cutoff)
+    ρH   = apply(ρ, H; maxdim=maxdim, cutoff=cutoff)
+    comm = +(Hρ, -1.0 * ρH; cutoff=cutoff)
+    ITensorMPS.truncate!(comm; maxdim=maxdim, cutoff=cutoff)
+    return -1.0im * comm
+end
+
+
+# ============================================================
+# rk4_step_dm_timedep
+# Single RK4 step for dρ/dt = -i[H(t), ρ] with a time-dependent
+# Hamiltonian MPO H(t).  H is evaluated at t, t+dt/2, and t+dt
+# as required by the classical RK4 tableau.
+# ============================================================
+function rk4_step_dm_timedep(Hoft, ρ::MPO, t::Float64, dt::Float64;
+    maxdim::Int     = 200,
+    cutoff::Float64 = 1e-10,
+    truncate_intermediates::Bool = true,
+)
+    H0   = Hoft(t)
+    Hmid = Hoft(t + dt / 2)
+    H1   = Hoft(t + dt)
+
+    k1 = _von_neumann_rhs(H0,   ρ;  maxdim=maxdim, cutoff=cutoff)
+
+    ρ2 = +(ρ, (dt / 2) * k1; cutoff=cutoff)
+    truncate_intermediates && ITensorMPS.truncate!(ρ2; maxdim=maxdim, cutoff=cutoff)
+    k2 = _von_neumann_rhs(Hmid, ρ2; maxdim=maxdim, cutoff=cutoff)
+
+    ρ3 = +(ρ, (dt / 2) * k2; cutoff=cutoff)
+    truncate_intermediates && ITensorMPS.truncate!(ρ3; maxdim=maxdim, cutoff=cutoff)
+    k3 = _von_neumann_rhs(Hmid, ρ3; maxdim=maxdim, cutoff=cutoff)
+
+    ρ4 = +(ρ, dt * k3; cutoff=cutoff)
+    truncate_intermediates && ITensorMPS.truncate!(ρ4; maxdim=maxdim, cutoff=cutoff)
+    k4 = _von_neumann_rhs(H1,   ρ4; maxdim=maxdim, cutoff=cutoff)
+
+    k_sum = +(k1, 2.0 * k2; cutoff=cutoff)
+    k_sum = +(k_sum, 2.0 * k3; cutoff=cutoff)
+    k_sum = +(k_sum, k4; cutoff=cutoff)
+    ITensorMPS.truncate!(k_sum; maxdim=maxdim, cutoff=cutoff)
+
+    ρ_new = +(ρ, (dt / 6) * k_sum; cutoff=cutoff)
+    ITensorMPS.truncate!(ρ_new; maxdim=maxdim, cutoff=cutoff)
+
+    return ρ_new
+end
+
+
+# ============================================================
+# evolve_rk4_dm_timedep
+# RK4 loop for a time-dependent Hamiltonian H(t), evolving a
+# density matrix MPO ρ for nsteps steps of size dt via
+# dρ/dt = -i[H(t), ρ].
+# Returns the full trajectory as a Vector{MPO}.
+# ============================================================
+function evolve_rk4_dm_timedep(Hoft, ρ0::MPO, nsteps::Int, dt::Float64;
+    maxdim::Int     = 200,
+    cutoff::Float64 = 1e-10,
+    truncate_intermediates::Bool = true,
+    verbose::Bool   = false,
+)
+    states = Vector{MPO}(undef, nsteps + 1)
+    states[1] = deepcopy(ρ0)
+
+    ρ = deepcopy(ρ0)
+    for step in 1:nsteps
+        t = (step - 1) * dt
+        verbose && println("RK4 step $step / $nsteps,  t = $t,  maxlinkdim = $(ITensorMPS.maxlinkdim(ρ))")
+        ρ = rk4_step_dm_timedep(Hoft, ρ, t, dt;
+            maxdim=maxdim,
+            cutoff=cutoff,
+            truncate_intermediates=truncate_intermediates,
+        )
+        states[step + 1] = deepcopy(ρ)
+    end
+
+    return states
+end
+
+
+# ============================================================
+# dm_expect
+# Compute the expectation value Tr(O ρ) of a Hermitian operator
+# MPO O in the density matrix ρ.
+# Uses inner(O, ρ) = Tr(O† ρ) = Tr(O ρ) for Hermitian O.
+# ============================================================
+function dm_expect(O::MPO, ρ::MPO)
+    return real(inner(O, ρ))
+end
+
+
+# ============================================================
+# current_trajectory
+# Compute ⟨J(t)⟩ = Tr(J ρ(t)) at every step of a density matrix
+# trajectory produced by evolve_rk4_dm_timedep.
+# J_mpo is the current operator (Hermitian MPO).
+# Returns a Vector{Float64} of length length(states).
+# ============================================================
+function current_trajectory(J_mpo::MPO, states::Vector{MPO})
+    return [dm_expect(J_mpo, ρ) for ρ in states]
+end
+
+
+# ============================================================
+# observables_trajectory
+# Measure a named collection of Hermitian operator MPOs along a
+# trajectory.  ops is a NamedTuple or Dict mapping labels to MPOs,
+# e.g. (J=J_mpo, N=N_mpo).
+# Returns a Dict mapping each label to a Vector{Float64}.
+# ============================================================
+function observables_trajectory(ops, states::Vector{MPO})
+    return Dict(k => [dm_expect(v, ρ) for ρ in states] for (k, v) in pairs(ops))
+end
+
+
+# ============================================================
+# timedep_observable_trajectory
+# Measure a time-dependent Hermitian operator O(t) along a
+# trajectory.  Oft is a callable t -> MPO evaluated at the time
+# corresponding to each state: t_n = (n-1)*dt.
+# Covers e.g. energy ⟨H(t)⟩ = Tr(H(t) ρ(t)) under a driven H.
+# Returns a Vector{Float64} of length length(states).
+# ============================================================
+function timedep_observable_trajectory(Oft, states::Vector{MPO}, dt::Float64)
+    return [dm_expect(Oft((step - 1) * dt), ρ) for (step, ρ) in enumerate(states)]
+end
+
+
+# ============================================================
+# current_operator
+# Compute the current operator J = ∂H/∂A at a given vector
+# potential value A_x.  With the Peierls decomposition
+#   H(Ax) = H_y + cos(Ax) H_x_real + sin(Ax) H_x_imag
+# the current is
+#   J(Ax) = ∂H/∂Ax = -sin(Ax) H_x_real + cos(Ax) H_x_imag
+# ============================================================
+function current_operator(A_x::Real, H_x_real::MPO, H_x_imag::MPO;
+    cutoff::Float64 = 1e-10,
+)
+    return +(-sin(A_x) * H_x_real, cos(A_x) * H_x_imag; cutoff=cutoff)
+end
+
+
+# ============================================================
+# current_operator_trajectory
+# Compute ⟨J(t)⟩ = Tr(J(t) ρ(t)) along a density-matrix
+# trajectory produced by evolve_rk4_dm_timedep.  The current
+# operator at each step is built from
+#   J(t) = ∂H(t)/∂A = -sin(A(t)) H_x_real + cos(A(t)) H_x_imag
+# where Aoft is a callable t -> Real (the vector potential).
+# Returns a Vector{Float64} of length length(states).
+# ============================================================
+function current_operator_trajectory(Aoft, H_x_real::MPO, H_x_imag::MPO,
+    states::Vector{MPO}, dt::Float64;
+    cutoff::Float64 = 1e-10,
+)
+    return [
+        dm_expect(
+            current_operator(Aoft((step - 1) * dt), H_x_real, H_x_imag; cutoff=cutoff),
+            ρ,
+        )
+        for (step, ρ) in enumerate(states)
+    ]
+end
+
+
+# ============================================================
+# single_bond_current_mpo
+# Build the quantics MPO for the single-bond observable needed
+# to measure the bond current on bond (j, j+1) (j 0-indexed).
+# Returns O_j such that
+#   inner(O_j, ρ) = Tr(c†_{j+1} c_j ρ) = ρ^SP_{j, j+1}
+# In the N-dimensional single-particle space, O_j has a single
+# nonzero entry at 1-indexed position (j+1, j+2).  The rank-1
+# structure means QTCI converges in one step from that pivot.
+# ============================================================
+function single_bond_current_mpo(j::Int, N::Int, sites; cutoff::Float64 = 1e-8)
+    row, col = j + 1, j + 2
+    f = (i, k) -> (i == row && k == col) ? ComplexF64(1) : ComplexF64(0)
+    return hopping2MPO(f, N, sites;
+        tol              = cutoff,
+        initial_positions = [(row, col)],
+        type             = ComplexF64,
+    )
+end
+
+
+# ============================================================
+# xbond_current_mpos
+# Pre-build single-bond observable MPOs for every x-direction
+# bond of a square lattice with Lx sites per row.  Right-edge
+# bonds (j % Lx == Lx − 1) are skipped to avoid connecting
+# adjacent rows through the periodic wraparound.
+# Returns (bonds, mpos):
+#   bonds — Vector of (j, j+1) pairs (0-indexed physical sites)
+#   mpos  — corresponding Vector{MPO}
+# ============================================================
+function xbond_current_mpos(Lx::Int, N::Int, sites; cutoff::Float64 = 1e-8)
+    bonds = [(j, j + 1) for j in 0:N-2 if j % Lx != Lx - 1]
+    mpos  = [single_bond_current_mpo(j, N, sites; cutoff = cutoff) for (j, _) in bonds]
+    return bonds, mpos
+end
+
+
+# ============================================================
+# bond_current_density_trajectory
+# Compute ⟨J_{j→j+1}(t)⟩ for every x-direction bond over a
+# density-matrix trajectory produced by evolve_rk4_dm_timedep.
+#
+# The bond current is
+#   J_{j→j+1}(t) = −2 Im(t_eff(t) · ρ^SP_{j,j+1}(t))
+# with t_eff(t) = t_x · exp(i · Aoft(t)) (Peierls factor) and
+#   ρ^SP_{j,j+1}(t) = inner(O_j, ρ(t)) = Tr(c†_{j+1} c_j ρ(t)).
+#
+# Arguments
+#   Aoft    — callable t -> Real, the vector potential A_x(t)
+#   t_x     — bare hopping amplitude (real, without Peierls phase)
+#   Lx      — sites per row (determines which bonds are x-bonds)
+#   N, sites — system size and ITensors site indices
+#   states  — Vector{MPO} density-matrix trajectory
+#   dt      — time step between states
+#
+# Returns
+#   bonds     — Vector of (j, j+1) pairs (0-indexed)
+#   J_density — Matrix{Float64} of size (nsteps, nbonds),
+#               suitable for a heatmap of current vs. bond and time
+# ============================================================
+function bond_current_density_trajectory(Aoft, t_x::Real, Lx::Int, N::Int,
+    sites, states::Vector{MPO}, dt::Float64;
+    cutoff::Float64 = 1e-8,
+)
+    bonds, hop_mpos = xbond_current_mpos(Lx, N, sites; cutoff = cutoff)
+    nsteps    = length(states)
+    nbonds    = length(bonds)
+    J_density = Matrix{Float64}(undef, nsteps, nbonds)
+
+    for (step, ρ) in enumerate(states)
+        t     = (step - 1) * dt
+        t_eff = t_x * exp(im * Aoft(t))
+        for (b, mpo) in enumerate(hop_mpos)
+            rho_sp            = inner(mpo, ρ)   # = ρ^SP_{j, j+1}
+            J_density[step, b] = -2 * imag(t_eff * rho_sp)
+        end
+    end
+
+    return bonds, J_density
+end
+
+
+# ============================================================
+# purity / purity_trajectory
+# Purity Tr(ρ²) = inner(ρ, ρ).  Equals 1 for a pure state and
+# decreases as the system becomes mixed under driving.
+# ============================================================
+function purity(ρ::MPO)
+    return real(inner(ρ, ρ))
+end
+
+function purity_trajectory(states::Vector{MPO})
+    return [purity(ρ) for ρ in states]
+end
+
+
+# ============================================================
 # compare_propagator_and_tdvp_heatmaps
 # Full comparison: evolve psi0 with both U_mpo and TDVP for
 # nsteps, plot heatmaps and agreement metrics.
@@ -498,3 +768,5 @@ function compare_propagator_and_tdvp_heatmaps(U_mpo, H, psi0, L, sites, nsteps;
         state_phase_distance   = state_phase_distance,
     )
 end
+
+

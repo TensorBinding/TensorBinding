@@ -1,25 +1,74 @@
-function KPM_Tn(H,N,sites;maxdim=40)
-    Id_op = MPO(sites, "Id")
-    Ham_n = H
-    T_k_minus_2 = Id_op
-    T_k_minus_1 = Ham_n   
-    Tn_list = [T_k_minus_2,T_k_minus_1]
+"""
+    KPM_Tn(H_mpo, N, sites; scale=nothing, maxdim=40,
+           dmrg_nsweeps, dmrg_maxdim, dmrg_linkdim) -> (Tn_list, scale, center)
 
-    for k in 1:N
-        if k == 1
-            T_k = T_k_minus_2
-        elseif k == 2
-            T_k = T_k_minus_1
-        else
-            T_k = +(2 * apply(Ham_n, T_k_minus_1;  cutoff = 1e-8) , -T_k_minus_2;  maxdim = maxdim)
-            T_k = ITensorMPS.truncate!(T_k; cutoff = 1e-8)
-            T_k_minus_2 = T_k_minus_1 
-            T_k_minus_1 =  T_k
-            push!(Tn_list,T_k)
-            println(ITensorMPS.maxlinkdim(T_k))
-        end
+Build the list of Chebyshev MPOs `T_n((H−center·I)/scale)` for `n = 0…N`.
+
+## Scale argument
+- If `scale` is provided the spectrum is assumed centered at zero and `H/scale`
+  is used directly (backward-compatible path).
+- If `scale` is `nothing` the spectral bounds are estimated automatically by
+  running a short DMRG minimisation of H (ground state, E_min) and −H (maximum,
+  E_max).  The scale and center are then:
+      center = (E_max + E_min) / 2
+      scale  = (E_max − E_min) / 2 × 1.1    ← 10 % buffer on each side
+
+## Return value
+Returns `(Tn_list, scale, center)`.  To convert a physical energy ω to the
+scaled argument passed to `get_ldos_w_from_Tn`:
+    ω_r = (ω − center) / scale  ∈ (−1, 1)
+"""
+function KPM_Tn(H_mpo::MPO, N::Int, sites;
+                scale::Union{Real, Nothing} = nothing,
+                maxdim::Int   = 40,
+                dmrg_nsweeps::Int  = 5,
+                dmrg_maxdim        = [10, 20, 40],
+                dmrg_linkdim::Int  = 4)
+
+    # ── Spectral bounds ───────────────────────────────────────────────────
+    if isnothing(scale)
+        println("KPM_Tn: estimating spectral bounds via DMRG…")
+        E_min, _ = dmrg_gs(H_mpo, sites;
+                           nsweeps      = dmrg_nsweeps,
+                           maxdim       = dmrg_maxdim,
+                           linkdim_init = dmrg_linkdim,
+                           noise        = [1e-6, 1e-7, 0.0],
+                           outputlevel  = 0)
+        E_max_neg, _ = dmrg_gs((-1.0) * H_mpo, sites;
+                                nsweeps      = dmrg_nsweeps,
+                                maxdim       = dmrg_maxdim,
+                                linkdim_init = dmrg_linkdim,
+                                noise        = [1e-6, 1e-7, 0.0],
+                                outputlevel  = 0)
+        E_max  = -E_max_neg
+        center = (E_max + E_min) / 2
+        scale  = (E_max - E_min) / 2 * 1.1
+        println("  E_min = $(round(E_min; digits=4)),  E_max = $(round(E_max; digits=4))")
+        println("  center = $(round(center; digits=4)),  scale = $(round(scale; digits=4))")
+    else
+        center = 0.0
     end
-    return Tn_list
+
+    # ── Scaled Hamiltonian: (H − center·I) / scale ────────────────────────
+    I_mpo   = MPO(sites, "Id")
+    Ham_n   = (1 / scale) * +(H_mpo, (-center) * I_mpo; cutoff = 1e-10)
+
+    # ── Chebyshev recursion T_0 = I,  T_1 = H_scaled,  T_k = 2H·T_{k-1} − T_{k-2}
+    T_k_minus_2 = I_mpo
+    T_k_minus_1 = Ham_n
+    Tn_list = [T_k_minus_2, T_k_minus_1]
+
+    for k in 3:N+1
+        T_k = +(2 * apply(Ham_n, T_k_minus_1; cutoff = 1e-8),
+                -T_k_minus_2; maxdim = maxdim)
+        T_k = ITensorMPS.truncate!(T_k; cutoff = 1e-8)
+        T_k_minus_2 = T_k_minus_1
+        T_k_minus_1 = T_k
+        push!(Tn_list, T_k)
+        println(ITensorMPS.maxlinkdim(T_k))
+    end
+
+    return Tn_list, scale, center
 end
 
 function get_density_from_Tn(Tn_list,N;fermi=0,maxdim=40)  

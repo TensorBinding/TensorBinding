@@ -34,8 +34,8 @@ Compute `ρ²` via `apply` and truncate immediately.  The intermediate
 bond dimension of `apply` is controlled by `maxdim`.
 """
 function _mpo_sq(ρ::MPO; maxdim::Int, cutoff::Float64)
-    ρ2 = apply(ρ, ρ; maxdim=maxdim, cutoff=cutoff)
-    ITensorMPS.truncate!(ρ2; maxdim=maxdim, cutoff=cutoff)
+    ρ2 = apply(ρ, ρ; maxdim, cutoff)
+    ITensorMPS.truncate!(ρ2; maxdim, cutoff)
     return ρ2
 end
 
@@ -85,16 +85,16 @@ function mcweeny_purify(ρ0::MPO;
                         verbose::Bool   = false)
     ρ = deepcopy(ρ0)
     for iter in 1:maxiters
-        ρ2  = _mpo_sq(ρ; maxdim=maxdim, cutoff=cutoff)
+        ρ2  = _mpo_sq(ρ; maxdim, cutoff)
         err = _idempotency_error(ρ, ρ2)
         verbose && println("McWeeny iter $iter: ‖ρ²-ρ‖/‖ρ‖ = $err, maxlinkdim = $(ITensorMPS.maxlinkdim(ρ))")
         err < tol && break
         # ρ³ = ρ² · ρ
-        ρ3 = apply(ρ2, ρ; maxdim=maxdim, cutoff=cutoff)
-        ITensorMPS.truncate!(ρ3; maxdim=maxdim, cutoff=cutoff)
+        ρ3 = apply(ρ2, ρ; maxdim, cutoff)
+        ITensorMPS.truncate!(ρ3; maxdim, cutoff)
         # 3ρ² - 2ρ³
-        ρ = +(3.0 * ρ2, -2.0 * ρ3; cutoff=cutoff)
-        ITensorMPS.truncate!(ρ; maxdim=maxdim, cutoff=cutoff)
+        ρ = +(3.0 * ρ2, -2.0 * ρ3; cutoff)
+        ITensorMPS.truncate!(ρ; maxdim, cutoff)
     end
     return ρ
 end
@@ -133,7 +133,7 @@ function sp2_purify(ρ0::MPO, Nel::Real;
                     verbose::Bool   = false)
     ρ = deepcopy(ρ0)
     for iter in 1:maxiters
-        ρ2  = _mpo_sq(ρ; maxdim=maxdim, cutoff=cutoff)
+        ρ2  = _mpo_sq(ρ; maxdim, cutoff)
         err = _idempotency_error(ρ, ρ2)
         verbose && println("SP2 iter $iter: ‖ρ²-ρ‖/‖ρ‖ = $err, maxlinkdim = $(ITensorMPS.maxlinkdim(ρ))")
         err < tol && break
@@ -143,8 +143,8 @@ function sp2_purify(ρ0::MPO, Nel::Real;
             ρ = ρ2
         else
             # expand toward 1: 2ρ - ρ²
-            ρ = +(2.0 * ρ, -1.0 * ρ2; cutoff=cutoff)
-            ITensorMPS.truncate!(ρ; maxdim=maxdim, cutoff=cutoff)
+            ρ = +(2.0 * ρ, -1.0 * ρ2; cutoff)
+            ITensorMPS.truncate!(ρ; maxdim, cutoff)
         end
     end
     return ρ
@@ -167,11 +167,10 @@ which is the required input range for both `mcweeny_purify` and `sp2_purify`.
 
 Pass `scale = H.scale` from a `TBHamiltonian`.
 """
-function purification_initial_guess(H_mpo::MPO, scale::Float64, sites;
-                                    maxdim::Int    = 40,
+function purification_initial_guess(H_mpo::MPO, scale::Float64,                                     maxdim::Int    = 40,
                                     cutoff::Float64 = 1e-8)
     Id  = MPO(sites, "Id")
-    ρ0  = +(0.5 * Id, (-0.5 / scale) * H_mpo; cutoff=cutoff)
-    ITensorMPS.truncate!(ρ0; maxdim=maxdim, cutoff=cutoff)
+    ρ0  = +(0.5 * Id, (-0.5 / scale) * H_mpo; cutoff)
+    ITensorMPS.truncate!(ρ0; maxdim=maxdim, cutoff)
     return ρ0
 end

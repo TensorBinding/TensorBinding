@@ -381,7 +381,7 @@ end
 
 # Default parameters — override by passing kwargs to build_bubble_mpo/rpa_from_bubble_diag
 const CHI_BUBBLE    = 150
-const SIGN_BUBBLE   = -1
+const SIGN_BUBBLE   = 0
 const A_BUBBLE      = 6
 const MAXDIM_BUBBLE = 200
 const NSWEEPS_SOLVE = 20

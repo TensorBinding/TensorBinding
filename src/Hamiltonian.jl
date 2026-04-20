@@ -88,23 +88,29 @@ end
 # ============================================================
 
 """
-    hopping2MPO(f, N, sites; tol=1e-8, initial_positions=[], type=Float64) -> MPO
+    hopping2MPO(f, N, sites; tol=1e-8, initial_positions=[], type=Float64,
+                unfoldingscheme=:interleaved) -> MPO
 
 Compress an arbitrary N×N hopping matrix `H[i,j] = f(i,j)` into an
-MPO using Quantics Tensor Cross Interpolation on a 2D interleaved
-quantics grid (N must be a power of 2).
+MPO using Quantics Tensor Cross Interpolation on a 2D quantics grid
+(N must be a power of 2).
+
+`unfoldingscheme` controls the bit ordering of the 2D quantics grid:
+  - `:interleaved` (default) — row and column bits alternate: r_L c_L … r_1 c_1
+  - `:fused`                 — all row bits first, then column bits: r_L … r_1 c_L … c_1
 
 `initial_positions` seeds the TCI pivots; useful when the matrix has
 known structure (e.g. near-diagonal for short-time propagators).
 """
-function hopping2MPO(f, N, sites; tol=1e-8, initial_positions=[], type=Float64)
+function hopping2MPO(f, N, sites; tol=1e-8, initial_positions=[], type=Float64,
+                     unfoldingscheme=:interleaved)
     L     = Int(log2(N))
     qgrid = QuanticsGrids.DiscretizedGrid{2}(
         L, (1, 1), (N, N);
         includeendpoint=true,
-        unfoldingscheme=:interleaved,
+        unfoldingscheme=unfoldingscheme,
     )
-    if length(initial_positions) > 1
+    if length(initial_positions) >= 1
         initialpivots = [QuanticsGrids.origcoord_to_quantics(qgrid, pos)
                          for pos in initial_positions]
         ci, _, _ = quanticscrossinterpolate(type, f, qgrid;
@@ -116,7 +122,7 @@ function hopping2MPO(f, N, sites; tol=1e-8, initial_positions=[], type=Float64)
     citt = TensorCrossInterpolation.TensorTrain(ci.tci)
     mps  = ITensors.MPS(citt)
     println("MPS COMPUTED!")
-    mpo  = custom_mpo(mps, sites)
+    mpo  = unfoldingscheme == :fused ? fused_mpo(mps, sites) : custom_mpo(mps, sites)
     println("Turned into MPO!")
     ITensorMPS.truncate!(mpo; cutoff=1e-8)
     return mpo

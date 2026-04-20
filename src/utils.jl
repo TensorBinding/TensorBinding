@@ -104,6 +104,29 @@ end
 
 
 """
+    fused_mpo(mps, new_sites) -> MPO
+
+Convert an `N`-site MPS with dim-4 physical indices produced by QTCI on a
+`:fused` 2D quantics grid into an `N`-site MPO.  Each dim-4 physical index
+encodes one (bra-bit, ket-bit) pair; a combiner splits it into
+`new_sites[i]'` (bra) and `new_sites[i]` (ket).
+"""
+function fused_mpo(mps, new_sites)
+    N = length(mps)
+    @assert N == length(new_sites) "MPS has $N sites but new_sites has $(length(new_sites)) sites."
+    new_mpo = MPO(N)
+    for i in 1:N
+        T     = mps[i]
+        old_s = siteind(mps, i)           # dim-4 fused index
+        comb  = combiner(new_sites[i]', new_sites[i])
+        c_idx = combinedind(comb)
+        new_mpo[i] = replaceind(T, old_s, c_idx) * dag(comb)
+    end
+    return new_mpo
+end
+
+
+"""
     custom_mps(qtt, sites) -> MPS
 
 Replace the site indices of an MPS obtained from a 1D TCI tensor

@@ -41,5 +41,8 @@ include("TBSystem.jl")
 include("Meanfi_tk.jl")
 include("RPA_tk.jl")
 include("Timeev_tk.jl")
+include("twisted_tk.jl")
+include("Supercond_tk.jl")
+include("DMRG_tk.jl")
 
 end
