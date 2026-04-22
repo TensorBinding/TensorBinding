@@ -146,7 +146,7 @@ function qtci_matrix_to_MPO(A_fun, L, sites;
     )
     println("got grid!")
     if !isempty(initial_positions)
-        initialpivots = [QuanticsGrids.origcoord_to_quantics(qgrid, pos)
+        initialpivots = [QuanticsGrids.origcoord_to_quantics(qgrid, Float64.(pos))
                          for pos in initial_positions]
         ci, _, _ = quanticscrossinterpolate(type, A_fun, qgrid;
                                             tolerance=tol,

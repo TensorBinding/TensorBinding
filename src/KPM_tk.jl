@@ -23,7 +23,8 @@ function KPM_Tn(H_mpo::MPO, N::Int, sites;
                 maxdim::Int   = 40,
                 dmrg_nsweeps::Int  = 5,
                 dmrg_maxdim        = [10, 20, 40],
-                dmrg_linkdim::Int  = 4)
+                dmrg_linkdim::Int  = 4,
+                cutoff::Real       = 1e-8)
 
     # ── Spectral bounds ───────────────────────────────────────────────────
     if isnothing(scale)
@@ -51,7 +52,7 @@ function KPM_Tn(H_mpo::MPO, N::Int, sites;
 
     # ── Scaled Hamiltonian: (H − center·I) / scale ────────────────────────
     I_mpo   = MPO(sites, "Id")
-    Ham_n   = (1 / scale) * +(H_mpo, (-center) * I_mpo; cutoff = 1e-10)
+    Ham_n   = (1 / scale) * +(H_mpo, (-center) * I_mpo; cutoff = cutoff)
 
     # ── Chebyshev recursion T_0 = I,  T_1 = H_scaled,  T_k = 2H·T_{k-1} − T_{k-2}
     T_k_minus_2 = I_mpo
@@ -59,9 +60,9 @@ function KPM_Tn(H_mpo::MPO, N::Int, sites;
     Tn_list = [T_k_minus_2, T_k_minus_1]
 
     for k in 3:N+1
-        T_k = +(2 * apply(Ham_n, T_k_minus_1; cutoff = 1e-8),
+        T_k = +(2 * apply(Ham_n, T_k_minus_1; cutoff = cutoff),
                 -T_k_minus_2; maxdim = maxdim)
-        T_k = ITensorMPS.truncate!(T_k; cutoff = 1e-8)
+        T_k = ITensorMPS.truncate!(T_k; cutoff = cutoff)
         T_k_minus_2 = T_k_minus_1
         T_k_minus_1 = T_k
         push!(Tn_list, T_k)

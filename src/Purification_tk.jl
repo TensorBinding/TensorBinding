@@ -167,7 +167,7 @@ which is the required input range for both `mcweeny_purify` and `sp2_purify`.
 
 Pass `scale = H.scale` from a `TBHamiltonian`.
 """
-function purification_initial_guess(H_mpo::MPO, scale::Float64,                                     maxdim::Int    = 40,
+function purification_initial_guess(H_mpo::MPO, scale::Float64, sites; maxdim::Int= 40,
                                     cutoff::Float64 = 1e-8)
     Id  = MPO(sites, "Id")
     ρ0  = +(0.5 * Id, (-0.5 / scale) * H_mpo; cutoff)

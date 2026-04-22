@@ -476,16 +476,6 @@ function dm_expect(O::MPO, ρ::MPO)
 end
 
 
-# ============================================================
-# current_trajectory
-# Compute ⟨J(t)⟩ = Tr(J ρ(t)) at every step of a density matrix
-# trajectory produced by evolve_rk4_dm_timedep.
-# J_mpo is the current operator (Hermitian MPO).
-# Returns a Vector{Float64} of length length(states).
-# ============================================================
-function current_trajectory(J_mpo::MPO, states::Vector{MPO})
-    return [dm_expect(J_mpo, ρ) for ρ in states]
-end
 
 
 # ============================================================
@@ -513,125 +503,7 @@ function timedep_observable_trajectory(Oft, states::Vector{MPO}, dt::Float64)
 end
 
 
-# ============================================================
-# current_operator
-# Compute the current operator J = ∂H/∂A at a given vector
-# potential value A_x.  With the Peierls decomposition
-#   H(Ax) = H_y + cos(Ax) H_x_real + sin(Ax) H_x_imag
-# the current is
-#   J(Ax) = ∂H/∂Ax = -sin(Ax) H_x_real + cos(Ax) H_x_imag
-# ============================================================
-function current_operator(A_x::Real, H_x_real::MPO, H_x_imag::MPO;
-    cutoff::Float64 = 1e-10,
-)
-    return +(-sin(A_x) * H_x_real, cos(A_x) * H_x_imag; cutoff=cutoff)
-end
 
-
-# ============================================================
-# current_operator_trajectory
-# Compute ⟨J(t)⟩ = Tr(J(t) ρ(t)) along a density-matrix
-# trajectory produced by evolve_rk4_dm_timedep.  The current
-# operator at each step is built from
-#   J(t) = ∂H(t)/∂A = -sin(A(t)) H_x_real + cos(A(t)) H_x_imag
-# where Aoft is a callable t -> Real (the vector potential).
-# Returns a Vector{Float64} of length length(states).
-# ============================================================
-function current_operator_trajectory(Aoft, H_x_real::MPO, H_x_imag::MPO,
-    states::Vector{MPO}, dt::Float64;
-    cutoff::Float64 = 1e-10,
-)
-    return [
-        dm_expect(
-            current_operator(Aoft((step - 1) * dt), H_x_real, H_x_imag; cutoff=cutoff),
-            ρ,
-        )
-        for (step, ρ) in enumerate(states)
-    ]
-end
-
-
-# ============================================================
-# single_bond_current_mpo
-# Build the quantics MPO for the single-bond observable needed
-# to measure the bond current on bond (j, j+1) (j 0-indexed).
-# Returns O_j such that
-#   inner(O_j, ρ) = Tr(c†_{j+1} c_j ρ) = ρ^SP_{j, j+1}
-# In the N-dimensional single-particle space, O_j has a single
-# nonzero entry at 1-indexed position (j+1, j+2).  The rank-1
-# structure means QTCI converges in one step from that pivot.
-# ============================================================
-function single_bond_current_mpo(j::Int, N::Int, sites; cutoff::Float64 = 1e-8)
-    row, col = j + 1, j + 2
-    f = (i, k) -> (i == row && k == col) ? ComplexF64(1) : ComplexF64(0)
-    return hopping2MPO(f, N, sites;
-        tol              = cutoff,
-        initial_positions = [(row, col)],
-        type             = ComplexF64,
-    )
-end
-
-
-# ============================================================
-# xbond_current_mpos
-# Pre-build single-bond observable MPOs for every x-direction
-# bond of a square lattice with Lx sites per row.  Right-edge
-# bonds (j % Lx == Lx − 1) are skipped to avoid connecting
-# adjacent rows through the periodic wraparound.
-# Returns (bonds, mpos):
-#   bonds — Vector of (j, j+1) pairs (0-indexed physical sites)
-#   mpos  — corresponding Vector{MPO}
-# ============================================================
-function xbond_current_mpos(Lx::Int, N::Int, sites; cutoff::Float64 = 1e-8)
-    bonds = [(j, j + 1) for j in 0:N-2 if j % Lx != Lx - 1]
-    mpos  = [single_bond_current_mpo(j, N, sites; cutoff = cutoff) for (j, _) in bonds]
-    return bonds, mpos
-end
-
-
-# ============================================================
-# bond_current_density_trajectory
-# Compute ⟨J_{j→j+1}(t)⟩ for every x-direction bond over a
-# density-matrix trajectory produced by evolve_rk4_dm_timedep.
-#
-# The bond current is
-#   J_{j→j+1}(t) = −2 Im(t_eff(t) · ρ^SP_{j,j+1}(t))
-# with t_eff(t) = t_x · exp(i · Aoft(t)) (Peierls factor) and
-#   ρ^SP_{j,j+1}(t) = inner(O_j, ρ(t)) = Tr(c†_{j+1} c_j ρ(t)).
-#
-# Arguments
-#   Aoft    — callable t -> Real, the vector potential A_x(t)
-#   t_x     — bare hopping amplitude (real, without Peierls phase)
-#   Lx      — sites per row (determines which bonds are x-bonds)
-#   N, sites — system size and ITensors site indices
-#   states  — Vector{MPO} density-matrix trajectory
-#   dt      — time step between states
-#
-# Returns
-#   bonds     — Vector of (j, j+1) pairs (0-indexed)
-#   J_density — Matrix{Float64} of size (nsteps, nbonds),
-#               suitable for a heatmap of current vs. bond and time
-# ============================================================
-function bond_current_density_trajectory(Aoft, t_x::Real, Lx::Int, N::Int,
-    sites, states::Vector{MPO}, dt::Float64;
-    cutoff::Float64 = 1e-8,
-)
-    bonds, hop_mpos = xbond_current_mpos(Lx, N, sites; cutoff = cutoff)
-    nsteps    = length(states)
-    nbonds    = length(bonds)
-    J_density = Matrix{Float64}(undef, nsteps, nbonds)
-
-    for (step, ρ) in enumerate(states)
-        t     = (step - 1) * dt
-        t_eff = t_x * exp(im * Aoft(t))
-        for (b, mpo) in enumerate(hop_mpos)
-            rho_sp            = inner(mpo, ρ)   # = ρ^SP_{j, j+1}
-            J_density[step, b] = -2 * imag(t_eff * rho_sp)
-        end
-    end
-
-    return bonds, J_density
-end
 
 
 # ============================================================
@@ -767,6 +639,60 @@ function compare_propagator_and_tdvp_heatmaps(U_mpo, H, psi0, L, sites, nsteps;
         state_overlap_abs      = state_overlap_abs,
         state_phase_distance   = state_phase_distance,
     )
+end
+
+
+# ============================================================
+# bond_current_x
+# Compute the x-direction bond current
+#   J_j^x = i t_x (ρ_{j,j+1} - ρ_{j+1,j})
+# for a single bond at 0-indexed site j in a density-matrix MPO ρ.
+# tx is the hopping amplitude (scalar).
+# ============================================================
+function bond_current_x(ρ::MPO, j::Int, tx::Number, L::Int, sites)
+    ρ_fwd = TensorBinding.matrix_checker(ρ, L, sites, j,     j + 1)
+    ρ_bwd = TensorBinding.matrix_checker(ρ, L, sites, j + 1, j    )
+    return im * tx * (ρ_fwd - ρ_bwd)
+end
+
+
+# ============================================================
+# bond_current_x_trajectory
+# Compute J_j^x(t) along a trajectory of density-matrix MPOs.
+# tx may be a scalar or a callable t -> hopping amplitude for a
+# time-dependent drive.  States are assumed spaced by dt:
+#   t_n = (n-1)*dt  (step 1 → t = 0).
+# Returns a Vector{ComplexF64} of length(states).
+# ============================================================
+function bond_current_x_trajectory(
+    states::Vector{MPO},
+    j::Int,
+    tx,
+    L::Int,
+    sites;
+    dt::Float64 = 1.0,
+)
+    return [bond_current_x(ρ, j, tx isa Number ? tx : tx((step - 1) * dt), L, sites)
+            for (step, ρ) in enumerate(states)]
+end
+
+
+# ============================================================
+# central_x_bond
+# Return the 0-indexed site j of the central x-direction bond,
+# i.e. the bond j -> j+1.
+# 1D (Nx = nothing): central bond at j = 2^L ÷ 2 - 1.
+# 2D row-major (Nx = 2^Lx): bond at the centre column of the
+#   centre row, j = (Ny÷2)*Nx + Nx÷2 - 1  where Ny = 2^L ÷ Nx.
+# ============================================================
+function central_x_bond(L::Int; Nx::Union{Int,Nothing} = nothing)
+    N = 2^L
+    if Nx === nothing
+        return N ÷ 2 - 1
+    else
+        Ny = N ÷ Nx
+        return (Ny ÷ 2) * Nx + Nx ÷ 2 - 1
+    end
 end
 
 
