@@ -40,6 +40,7 @@ mutable struct TBHamiltonian
     # ---- auxiliary prepended indices (nothing until add_spin!/add_superconductivity!) ----
     spin_s   :: Union{Nothing, Index}
     nambu_s  :: Union{Nothing, Index}
+    layer_s  :: Union{Nothing, Index}    # set by bilayer/multilayer constructors
     # ---- lazy caches (invalidated whenever mpo changes) ----
     _tn_cache      :: Union{Nothing, Vector{MPO}}
     _tn_Ncheb      :: Int
@@ -151,7 +152,7 @@ function _build_chain_1d(t, L, N, sites; scale=nothing, tol=1e-8, maxdim=15)
     ITensorMPS.truncate!(mpo; maxdim=maxdim, cutoff=tol)
     geom = reshape(Float64.(1:N), N, 1)
     sc   = something(scale, 2.2 * abs(t))   # 1D chain bandwidth = 4|t|, half = 2|t|
-    return TBHamiltonian(L, N, sites, mpo, geom, sc, nothing, nothing, nothing, 0, nothing)
+    return TBHamiltonian(L, N, sites, mpo, geom, sc, nothing, nothing, nothing, nothing, 0, nothing)
 end
 
 
@@ -170,7 +171,7 @@ function _build_square_2d(t, L, N, sites;
         geom[i, 2] = Float64(div(i - 1, Lx) + 1)
     end
     sc = something(scale, 4.4 * abs(t))   # 2D square bandwidth ≈ 8|t|, half = 4|t|
-    return TBHamiltonian(L, N, sites, mpo, geom, sc, nothing, nothing, nothing, 0, nothing)
+    return TBHamiltonian(L, N, sites, mpo, geom, sc, nothing, nothing, nothing, nothing, 0, nothing)
 end
 
 
@@ -187,7 +188,7 @@ function _build_haldane(params, L, N, sites;
     ITensorMPS.truncate!(mpo; maxdim=maxdim, cutoff=tol)
     # bandwidth ≈ 2*(3*t1 + 6*t2) + 2*M where t1=1; conservative upper bound
     sc  = something(scale, (1.0 + abs(t2) + abs(M)) * 4.0)
-    return TBHamiltonian(L, N, sites, mpo, Float64.(rs), sc, nothing, nothing, nothing, 0, nothing)
+    return TBHamiltonian(L, N, sites, mpo, Float64.(rs), sc, nothing, nothing, nothing, nothing, 0, nothing)
 end
 
 
@@ -200,7 +201,7 @@ function _build_custom(f, L, N, sites;
     @assert !isnothing(scale) "`scale` must be provided for geometry=\"custom\"."
     mpo = hopping2MPO(f, N, sites; tol=tol, type=type)
     ITensorMPS.truncate!(mpo; maxdim=maxdim, cutoff=tol)
-    return TBHamiltonian(L, N, sites, mpo, geometry, Float64(scale), nothing, nothing, nothing, 0, nothing)
+    return TBHamiltonian(L, N, sites, mpo, geometry, Float64(scale), nothing, nothing, nothing, nothing, 0, nothing)
 end
 
 function _build_preset(geometry, params, L, N, sites;
@@ -242,7 +243,7 @@ function _build_preset(geometry, params, L, N, sites;
     # created at the top of get_Hamiltonian (which would be a different set).
     mpo_sites = getindex.(siteinds(mpo), 2)
     sc = something(scale, _estimate_scale(geometry, params))
-    return TBHamiltonian(L, N, mpo_sites, mpo, nothing, Float64(sc), nothing, nothing, nothing, 0, nothing)
+    return TBHamiltonian(L, N, mpo_sites, mpo, nothing, Float64(sc), nothing, nothing, nothing, nothing, 0, nothing)
 end
 
 # Rough scale estimates for known geometries (used when scale=nothing)
@@ -323,9 +324,9 @@ add_hopping!(H, (i, j) -> ...; type=ComplexF64)
 """
 function add_hopping!(H::TBHamiltonian, f;
                       maxdim=15, tol=1e-8, type=ComplexF64)
-    H.spin_s === nothing && H.nambu_s === nothing ||
-        error("add_hopping! must be called before add_spin!/add_superconductivity!. " *
-              "Build the full normal-state Hamiltonian first.")
+    H.spin_s === nothing && H.nambu_s === nothing && H.layer_s === nothing ||
+        error("add_hopping! must be called before add_spin!/add_superconductivity! " *
+              "and cannot be used on layered Hamiltonians (layer index already prepended).")
     new_term = hopping2MPO(f, H.N, H.sites; tol=tol, type=type)
     H.mpo    = +(H.mpo, new_term; maxdim=maxdim, cutoff=tol)
     ITensorMPS.truncate!(H.mpo; maxdim=maxdim, cutoff=tol)
@@ -616,6 +617,7 @@ function Base.show(io::IO, H::TBHamiltonian)
     geom_str = isnothing(H.geometry) ? "implicit 1D" :
                "$(size(H.geometry, 1)) sites, $(size(H.geometry, 2))D"
     aux_str  = ""
+    H.layer_s !== nothing && (aux_str *= " +$(ITensors.dim(H.layer_s))layers")
     H.spin_s  !== nothing && (aux_str *= " +spin")
     H.nambu_s !== nothing && (aux_str *= " +BdG")
     print(io, "TBHamiltonian | L=$(H.L), N=$(H.N)$(aux_str), scale=$(H.scale), " *

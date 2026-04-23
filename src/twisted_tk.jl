@@ -229,7 +229,9 @@ function twisted_multilayer_hamiltonian(
     # ── Assembly ──────────────────────────────────────────────────
     H_total = +(H_intra, H_inter; cutoff=cutoff)
     ITensorMPS.truncate!(H_total; maxdim=maxdim, cutoff=cutoff)
-    return H_total, ext_sites
+    # scale=1.0 placeholder — use KPM_Tn with auto DMRG detection (pass H.mpo directly)
+    return TBHamiltonian(L, 2^L, ext_sites, H_total, nothing, 1.0,
+                         nothing, nothing, layer_s, nothing, 0, nothing)
 end
 
 
