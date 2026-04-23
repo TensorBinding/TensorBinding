@@ -49,7 +49,6 @@ rho = get_density_from_Tn(Tn, 200; fermi=0.0, maxdim=100)
 - Bilayer and multilayer systems with AA or Bernal (AB) stacking
 - Twisted multilayer with exponentially decaying interlayer coupling (TCI-compressed)
 - Arbitrary hopping matrices `f(i,j)` compressed automatically via QTCI
-- Incremental modification: `add_hopping!`, `add_onsite!`
 
 **Spin and Nambu (BdG) extensions**  
 Supported: Ising SOC, Rashba SOC, uniform or site-dependent Zeeman, singlet *s*-wave and custom pairing.
