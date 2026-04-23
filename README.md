@@ -52,20 +52,12 @@ rho = get_density_from_Tn(Tn, 200; fermi=0.0, maxdim=100)
 - Incremental modification: `add_hopping!`, `add_onsite!`
 
 **Spin and Nambu (BdG) extensions**  
-Build up complex Hamiltonians step by step from a base kinetic MPO:
-```julia
-H = get_Hamiltonian("square_2d", 1.0; L=8)
-add_zeeman!(H, 0.1)              # Zeeman splitting
-add_soc!(H, 0.05)                # Rashba SOC
-add_superconductivity!(H, 0.2)   # s-wave BdG — site chain becomes [nambu, spin, pos...]
-```
 Supported: Ising SOC, Rashba SOC, uniform or site-dependent Zeeman, singlet *s*-wave and custom pairing.
 
 **Kernel Polynomial Method (KPM)**
 - Chebyshev expansion of spectral functions, Green's functions, and density matrices
 - Kernels: Jackson (default), Lorentz, Fejér, Dirichlet, HODC
 - Spectral function *A(k,ω)* via QFT conjugation (`get_bands`)
-- Stochastic trace estimation for large moiré systems
 
 **Density matrix purification**
 - `mcweeny_purify` — cubic map, quadratic convergence
@@ -74,8 +66,6 @@ Supported: Ising SOC, Rashba SOC, uniform or site-dependent Zeeman, singlet *s*-
 **Real-time evolution**
 - Pure states: TDVP (fixed and time-dependent *H*)
 - Density matrices: RK4 integration of *dρ/dt = −i[H(t), ρ]*
-- QTCI-compressed propagator MPO *U(Δt) = e<sup>−iHΔt</sup>* for repeated application
-- Bond current and observable trajectories included
 
 **Many-body methods**
 - DMRG ground state and spectral DMRG (`dmrg_gs`, `dmrg_spectral`)
@@ -86,32 +76,5 @@ Supported: Ising SOC, Rashba SOC, uniform or site-dependent Zeeman, singlet *s*-
 - Chern number and local Chern marker for Haldane and general 2D models
 - Winding number for SSH
 
----
-
-### Site Encoding
-
-| Degree of freedom | Position in site chain |
-|---|---|
-| Position qubits (always) | last *L* sites; site *n* ↔ binary *b₁b₂…b_L* (big-endian) |
-| Spin-½ (after `add_spin!`) | prepended before position qubits |
-| Nambu (after `add_superconductivity!`) | prepended before spin |
-| Layer index (bilayer/multilayer) | site 1 |
-
-Full BdG+spin chain: `[nambu_s, spin_s, pos_qubits...]`
-
-2D row-major index: *i = i_x + i_y · 2<sup>L_x</sup>*
-
----
-
-### Why TensorBinding.jl?
-
-| Traditional exact diagonalisation | TensorBinding.jl |
-|---|---|
-| Memory scales as *O(4<sup>L</sup>)* | Scales as *O(poly(L))* via MPO compression |
-| Limited to small systems (L ≲ 14) | Practical up to L = 20+ for structured models |
-| Full recomputation for each observable | Chebyshev list built once, reused for all observables |
-| No incremental Hamiltonian building | `add_hopping!`, `add_spin!`, `add_superconductivity!` etc. |
-
----
 
 The package is under active development. A full function reference is available in `TensorBinding_overview.txt` and example notebooks are in `examples/`.
