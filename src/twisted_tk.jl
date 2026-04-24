@@ -66,57 +66,24 @@ end
 
 
 # ─────────────────────────────────────────────────────────────────
-# 3.  Layer-core prepend helpers
+# 3.  Layer prepend helpers (thin wrappers around prepend_op)
 # ─────────────────────────────────────────────────────────────────
-
-"""
-    _prepend_layer_core(H_mpo, layer_s, op_entries) -> MPO
-
-Internal helper: prepend a single-site layer operator to `H_mpo`, extending
-it from L sites to L+1 sites.  `op_entries` is a vector of `(bra, ket, val)`
-triples giving the nonzero elements of the operator in the `layer_s` basis
-(1-indexed).
-
-The returned MPO has site indices `[layer_s; original_sites...]`.
-"""
-function _prepend_layer_core(H_mpo::MPO, layer_s::Index,
-                              op_entries::AbstractVector{<:Tuple})
-    Lh    = length(H_mpo)
-    bond0 = Index(1, "Link,l=0")
-    Op    = ITensor(layer_s', layer_s, bond0)
-    for (b, k, v) in op_entries
-        Op[layer_s' => b, layer_s => k, bond0 => 1] = v
-    end
-    delta0 = ITensor(bond0);  delta0[bond0 => 1] = 1.0
-    H1_ext = H_mpo[1] * delta0
-    ext    = MPO(Lh + 1)
-    ext[1] = Op
-    ext[2] = H1_ext
-    for k in 3:Lh+1
-        ext[k] = H_mpo[k-1]
-    end
-    return ext
-end
-
 
 """
     prepend_layer_projector(H_mpo, layer_s, k) -> MPO
 
-Extend `H_mpo` by prepending the diagonal projector P_k = |k⟩⟨k| on `layer_s`
-(layer index k is 1-based).  Used to build the intralayer term P_k ⊗ H.
+Prepend the diagonal projector `|k⟩⟨k|` on `layer_s` (1-based).
+Equivalent to `prepend_op(H_mpo, layer_s, k)`.
 """
-prepend_layer_projector(H::MPO, s::Index, k::Int) =
-    _prepend_layer_core(H, s, [(k, k, 1.0)])
-
+prepend_layer_projector(H::MPO, s::Index, k::Int) = prepend_op(H, s, k)
 
 """
     prepend_layer_hopping(H_mpo, layer_s, k, l) -> MPO
 
-Extend `H_mpo` by prepending the off-diagonal operator T_{kl} = |k⟩⟨l| on
-`layer_s`.  Used to build the interlayer term |k⟩⟨l| ⊗ V_{kl}.
+Prepend the off-diagonal operator `|k⟩⟨l|` on `layer_s` (1-based).
+Equivalent to `prepend_op(H_mpo, layer_s, k, l)`.
 """
-prepend_layer_hopping(H::MPO, s::Index, k::Int, l::Int) =
-    _prepend_layer_core(H, s, [(k, l, 1.0)])
+prepend_layer_hopping(H::MPO, s::Index, k::Int, l::Int) = prepend_op(H, s, k, l)
 
 
 # ─────────────────────────────────────────────────────────────────

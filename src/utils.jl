@@ -185,34 +185,121 @@ function get_diagonal_mpo(L, sites, f; type=Float64)
 end
 
 # ============================================================
-# Debug / validation utilities
+# Auxiliary site prepend — unified prepend_op
 # ============================================================
 
 """
-    matrix_checker(mpo, L, sites, i, j) -> Number
+    prepend_op(H_mpo, s, mat)       -> MPO   explicit matrix
+    prepend_op(H_mpo, s, op::Symbol)-> MPO   named op (Spin / Nambu index)
+    prepend_op(H_mpo, s, k, l)      -> MPO   sparse |k⟩⟨l|  (Layer / any index)
+    prepend_op(H_mpo, s, k)         -> MPO   projector |k⟩⟨k|
 
-Return the matrix element ⟨i|mpo|j⟩ by constructing computational-
-basis MPS.  Intended for small-system validation only.
+Prepend a single-site operator on index `s` to `H_mpo`, extending it from
+L sites to L+1 sites.  The returned MPO has site indices `[s; original…]`.
+
+**Dispatch rules**
+- Matrix form: `mat[i,j]` = ⟨i|op|j⟩ (1-indexed).  Element type is preserved.
+- Symbol form: named operator looked up by the type of `s` (tag `"Spin"` or
+  `"Nambu"`).  Defined in Supercond_tk.jl after the op dictionaries.
+- Integer pair `(k, l)`: places a single 1 at row `k`, col `l` in a
+  `dim(s) × dim(s)` zero matrix.  Covers layer hops and projectors for any
+  dimension Layer index.
+- Single integer `k`: shorthand for the projector `|k⟩⟨k|`.
 """
-function matrix_checker(mpo, L, sites, i, j)
-    psii = binary_to_MPS(Int(i), L, sites)
-    psij = binary_to_MPS(Int(j), L, sites)
-    return inner(psii, apply(mpo, psij))
+function prepend_op(H_mpo::MPO, s::Index, mat::AbstractMatrix{T}) where T <: Number
+    Lh    = length(H_mpo)
+    bond0 = Index(1, "Link,l=0")
+    Op    = ITensor(T, s', s, bond0)
+    for j in axes(mat, 2), i in axes(mat, 1)
+        iszero(mat[i, j]) || (Op[s' => i, s => j, bond0 => 1] = mat[i, j])
+    end
+    delta0 = ITensor(bond0);  delta0[bond0 => 1] = 1.0
+    H1_ext = H_mpo[1] * delta0
+    ext    = MPO(Lh + 1)
+    ext[1] = Op
+    ext[2] = H1_ext
+    for k in 3:Lh+1
+        ext[k] = H_mpo[k-1]
+    end
+    return ext
+end
+prepend_op(H::MPO, s::Index, mat::AbstractMatrix) =
+    prepend_op(H, s, ComplexF64.(mat))
+
+function prepend_op(H_mpo::MPO, s::Index, k::Int, l::Int)
+    mat = zeros(Float64, dim(s), dim(s))
+    mat[k, l] = 1.0
+    return prepend_op(H_mpo, s, mat)
+end
+prepend_op(H_mpo::MPO, s::Index, k::Int) = prepend_op(H_mpo, s, k, k)
+
+
+# ============================================================
+# Debug / validation utilities
+# ============================================================
+
+# Build a product-state MPS for basis state k (0-indexed, big-endian across
+# sites) without using string state names.  Works for any site types.
+function _basis_state_mps(k::Int, sites::Vector{<:Index})
+    n    = length(sites)
+    dims = dim.(sites)
+    vals = Vector{Int}(undef, n)
+    rem  = k
+    for i in n:-1:1          # peel off LSB first (big-endian storage)
+        vals[i] = rem % dims[i] + 1   # 1-based ITensors convention
+        rem      = rem ÷ dims[i]
+    end
+    links   = [Index(1, "Link,l=$i") for i in 1:n-1]
+    tensors = Vector{ITensor}(undef, n)
+    if n == 1
+        t = ITensor(sites[1]);  t[sites[1] => vals[1]] = 1.0
+        tensors[1] = t
+    else
+        t = ITensor(sites[1], links[1])
+        t[sites[1] => vals[1], links[1] => 1] = 1.0
+        tensors[1] = t
+        for i in 2:n-1
+            t = ITensor(links[i-1], sites[i], links[i])
+            t[links[i-1] => 1, sites[i] => vals[i], links[i] => 1] = 1.0
+            tensors[i] = t
+        end
+        t = ITensor(links[n-1], sites[n])
+        t[links[n-1] => 1, sites[n] => vals[n]] = 1.0
+        tensors[n] = t
+    end
+    return MPS(tensors)
 end
 
 
 """
-    get_matrix(mpo, L, sites) -> Matrix
+    matrix_checker(mpo, sites, i, j) -> Number
+    matrix_checker(mpo, L, sites, i, j) -> Number   (L ignored)
 
-Return the full 2^L × 2^L matrix representation of `mpo` by
-evaluating all matrix elements via `matrix_checker`.  Feasible
-only for small `L` (≲ 8).
+Return the matrix element ⟨i|mpo|j⟩.  Works for any site types
+(Qubit, Layer, Spin, Nambu …).  Intended for small-system validation.
 """
-function get_matrix(mpo, L, sites)
-    sz  = 2^L
+function matrix_checker(mpo, sites, i, j)
+    psii = _basis_state_mps(Int(i), sites)
+    psij = _basis_state_mps(Int(j), sites)
+    return inner(psii, apply(mpo, psij))
+end
+matrix_checker(mpo, ::Int, sites, i, j) = matrix_checker(mpo, sites, i, j)
+
+
+"""
+    get_matrix(mpo, sites) -> Matrix{ComplexF64}
+    get_matrix(mpo, L, sites) -> Matrix{ComplexF64}   (L ignored)
+
+Return the full `D × D` dense matrix of `mpo`, where `D = ∏ dim(sᵢ)`.
+Works for any site types (Qubit, Layer, Spin, Nambu …).
+Feasible only for small systems (D ≲ 512).
+"""
+function get_matrix(mpo, sites)
+    sz  = prod(dim(s) for s in sites)
     mat = Matrix{ComplexF64}(undef, sz, sz)
     for i in 0:sz-1, j in 0:sz-1
-        mat[i+1, j+1] = matrix_checker(mpo, L, sites, i, j)
+        mat[i+1, j+1] = matrix_checker(mpo, sites, i, j)
     end
     return mat
 end
+get_matrix(mpo, ::Int, sites) = get_matrix(mpo, sites)

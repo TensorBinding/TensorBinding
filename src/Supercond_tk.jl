@@ -13,43 +13,8 @@
 #   Nambu: state 1 = particle,  state 2 = hole
 
 # ─────────────────────────────────────────────────────────────────
-# 0.  General matrix-based prepend  (public; handles complex types)
+# 0.  Symbol dispatch for prepend_op (defined in utils.jl)
 # ─────────────────────────────────────────────────────────────────
-
-"""
-    prepend_core_op(H_mpo, s, mat) -> MPO
-
-Extend `H_mpo` by prepending a single-site operator given by the matrix `mat`
-acting on index `s`.  Entry `mat[i,j]` = ⟨i|op|j⟩ (1-indexed basis of `s`).
-
-This is the public, type-aware generalisation of the internal
-`_prepend_layer_core` used in twisted_tk.jl.  It correctly handles complex
-matrices (e.g., σ_y, τ_y) by allocating the ITensor with the element type of
-`mat`.
-
-The returned MPO has site indices `[s; original sites…]`.
-"""
-function prepend_core_op(H_mpo::MPO, s::Index, mat::AbstractMatrix{T}) where T <: Number
-    Lh    = length(H_mpo)
-    bond0 = Index(1, "Link,l=0")
-    Op    = ITensor(T, s', s, bond0)
-    for j in axes(mat, 2), i in axes(mat, 1)
-        iszero(mat[i, j]) || (Op[s' => i, s => j, bond0 => 1] = mat[i, j])
-    end
-    delta0 = ITensor(bond0);  delta0[bond0 => 1] = 1.0
-    H1_ext = H_mpo[1] * delta0
-    ext    = MPO(Lh + 1)
-    ext[1] = Op
-    ext[2] = H1_ext
-    for k in 3:Lh+1
-        ext[k] = H_mpo[k-1]
-    end
-    return ext
-end
-
-# Convenience: accept an untyped matrix by promoting to ComplexF64
-prepend_core_op(H::MPO, s::Index, mat::AbstractMatrix) =
-    prepend_core_op(H, s, ComplexF64.(mat))
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -82,37 +47,56 @@ const _SPIN_OPS = Dict{Symbol, Matrix{ComplexF64}}(
 
 
 """
+    prepend_op(H_mpo, s, op::Symbol) -> MPO
+
+Symbol dispatch for indices tagged `"Spin"` or `"Nambu"`.
+Looks up `op` in the appropriate operator dictionary and calls
+`prepend_op(H_mpo, s, mat)`.
+
+Spin ops (index tagged `"Spin"`):
+`:Id`, `:Pup`, `:Pdn`, `:Sz`, `:Sp`, `:Sm`, `:Sx`, `:Sy`, `:iSy`, `:miSy`
+
+Nambu ops (index tagged `"Nambu"`):
+`:Id`, `:Pp`, `:Ph`, `:tz`, `:tx`, `:ty`, `:tp`, `:tm`
+"""
+function prepend_op(H_mpo::MPO, s::Index, op::Symbol)
+    if hastags(s, "Spin")
+        mat = get(_SPIN_OPS, op, nothing)
+        isnothing(mat) && error("Unknown Spin op :$op.  Known: $(sort(collect(keys(_SPIN_OPS))))")
+    elseif hastags(s, "Nambu")
+        mat = get(_NAMBU_OPS, op, nothing)
+        isnothing(mat) && error("Unknown Nambu op :$op.  Known: $(sort(collect(keys(_NAMBU_OPS))))")
+    else
+        error("Symbol-based prepend_op requires a \"Spin\" or \"Nambu\" tagged index; got tags: $(tags(s))")
+    end
+    return prepend_op(H_mpo, s, mat)
+end
+
+
+"""
     prepend_spin(H_mpo, spin_s, op) -> MPO
 
-Extend `H_mpo` by prepending the spin-½ operator `op` on `spin_s`
-(created with `spin_index()`).
+Prepend a spin-½ operator on `spin_s` (created with `spin_index()`).
+`op` is a `Symbol` from the table below or an explicit 2×2 matrix.
+Equivalent to `prepend_op(H_mpo, spin_s, op)`.
 
-`op` may be a `Symbol` naming a built-in operator, or an explicit
-2×2 `AbstractMatrix` for custom operators.
-
-| Symbol  | Matrix             | Typical use                           |
-|---------|--------------------|---------------------------------------|
-| `:Id`   | I₂                 | Spin-degenerate term                  |
-| `:Pup`  | diag(1,0)          | Spin-up projector                     |
-| `:Pdn`  | diag(0,1)          | Spin-down projector                   |
-| `:Sz`   | diag(½,−½)         | Zeeman / exchange field               |
-| `:Sp`   | \\|↑⟩⟨↓\\|         | Spin-flip ↓→↑ (SOC, spin-orbit)      |
-| `:Sm`   | \\|↓⟩⟨↑\\|         | Spin-flip ↑→↓ (SOC, spin-orbit)      |
-| `:Sx`   | ½σ_x              | In-plane exchange                     |
-| `:Sy`   | ½σ_y              | In-plane exchange                     |
-| `:iSy`  | i·σ_y = [[0,1],[-1,0]] | Singlet pairing spin structure   |
-| `:miSy` | −i·σ_y            | h.c. of singlet pairing               |
+| Symbol  | Matrix                  | Typical use                      |
+|---------|-------------------------|----------------------------------|
+| `:Id`   | I₂                      | Spin-degenerate term             |
+| `:Pup`  | diag(1,0)               | Spin-up projector                |
+| `:Pdn`  | diag(0,1)               | Spin-down projector              |
+| `:Sz`   | diag(½,−½)              | Zeeman / exchange field          |
+| `:Sp`   | \\|↑⟩⟨↓\\|              | Spin-flip ↓→↑                   |
+| `:Sm`   | \\|↓⟩⟨↑\\|              | Spin-flip ↑→↓                   |
+| `:Sx`   | ½σ_x                    | In-plane exchange                |
+| `:Sy`   | ½σ_y                    | In-plane exchange                |
+| `:iSy`  | i·σ_y = [[0,1],[−1,0]] | Singlet pairing spin factor      |
+| `:miSy` | −i·σ_y                 | h.c. of singlet pairing          |
 
 Basis: state 1 = ↑, state 2 = ↓.
 """
-function prepend_spin(H_mpo::MPO, spin_s::Index,
-                      op::Union{Symbol, AbstractMatrix})
-    mat = op isa Symbol ?
-          (haskey(_SPIN_OPS, op) ? _SPIN_OPS[op] :
-           error("Unknown spin op :$op.  Known: $(sort(collect(keys(_SPIN_OPS))))")) :
-          ComplexF64.(op)
-    return prepend_core_op(H_mpo, spin_s, mat)
-end
+prepend_spin(H::MPO, s::Index, op::Symbol)           = prepend_op(H, s, op)
+prepend_spin(H::MPO, s::Index, mat::AbstractMatrix)  = prepend_op(H, s, mat)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -145,40 +129,25 @@ const _NAMBU_OPS = Dict{Symbol, Matrix{ComplexF64}}(
 """
     prepend_nambu(H_mpo, nambu_s, op) -> MPO
 
-Extend `H_mpo` by prepending the Nambu (particle–hole) operator `op` on
-`nambu_s` (created with `nambu_index()`).
+Prepend a Nambu (particle–hole) operator on `nambu_s` (created with `nambu_index()`).
+`op` is a `Symbol` from the table below or an explicit 2×2 matrix.
+Equivalent to `prepend_op(H_mpo, nambu_s, op)`.
 
-`op` may be a `Symbol` naming a built-in operator, or an explicit
-2×2 `AbstractMatrix`.
-
-| Symbol | Matrix              | Typical use                          |
-|--------|---------------------|--------------------------------------|
-| `:Id`  | I₂                  | Particle + hole (no asymmetry)       |
-| `:Pp`  | diag(1,0)           | Particle-sector projector            |
-| `:Ph`  | diag(0,1)           | Hole-sector projector                |
-| `:tz`  | diag(1,−1)          | Kinetic τ_z in BdG                   |
-| `:tp`  | \\|p⟩⟨h\\|          | Pairing amplitude Δ                  |
-| `:tm`  | \\|h⟩⟨p\\|          | Pairing Δ† (h.c.)                    |
-| `:tx`  | σ_x                 | Real pairing (spinless p-wave)       |
-| `:ty`  | σ_y                 | Imaginary / chiral pairing           |
+| Symbol | Matrix      | Typical use                    |
+|--------|-------------|--------------------------------|
+| `:Id`  | I₂          | Particle + hole                |
+| `:Pp`  | diag(1,0)   | Particle-sector projector      |
+| `:Ph`  | diag(0,1)   | Hole-sector projector          |
+| `:tz`  | diag(1,−1)  | Kinetic τ_z in BdG             |
+| `:tp`  | \\|p⟩⟨h\\|  | Pairing amplitude Δ            |
+| `:tm`  | \\|h⟩⟨p\\|  | Pairing Δ† (h.c.)              |
+| `:tx`  | σ_x         | Real pairing (spinless p-wave) |
+| `:ty`  | σ_y         | Imaginary / chiral pairing     |
 
 Basis: state 1 = particle, state 2 = hole.
-
-Typical spinless BdG assembly:
-```julia
-H_BdG = prepend_nambu(H_kin,         nambu_s, :tz)   # τ_z ⊗ H_kin
-      + prepend_nambu(H_pair,        nambu_s, :tp)   # τ_+ ⊗ Δ
-      + prepend_nambu(dag(H_pair),   nambu_s, :tm)   # τ_- ⊗ Δ†
-```
 """
-function prepend_nambu(H_mpo::MPO, nambu_s::Index,
-                       op::Union{Symbol, AbstractMatrix})
-    mat = op isa Symbol ?
-          (haskey(_NAMBU_OPS, op) ? _NAMBU_OPS[op] :
-           error("Unknown Nambu op :$op.  Known: $(sort(collect(keys(_NAMBU_OPS))))")) :
-          ComplexF64.(op)
-    return prepend_core_op(H_mpo, nambu_s, mat)
-end
+prepend_nambu(H::MPO, s::Index, op::Symbol)          = prepend_op(H, s, op)
+prepend_nambu(H::MPO, s::Index, mat::AbstractMatrix) = prepend_op(H, s, mat)
 
 
 # ─────────────────────────────────────────────────────────────────
