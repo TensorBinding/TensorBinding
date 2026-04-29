@@ -40,10 +40,11 @@ mutable struct TBHamiltonian
     scale    :: Float64    # energy half-bandwidth; 0.0 = not yet determined (triggers lazy DMRG)
     center   :: Float64    # spectral center; 0.0 for symmetric spectra
     # ---- auxiliary indices (nothing until add_spin!/add_superconductivity!) ----
-    spin_s   :: Union{Nothing, Index}
-    nambu_s  :: Union{Nothing, Index}
-    layer_s  :: Union{Nothing, Index}    # set by bilayer/multilayer constructors
-    aux_side :: Symbol                   # :pre (aux at front) or :post (aux at back)
+    spin_s        :: Union{Nothing, Index}
+    nambu_s       :: Union{Nothing, Index}
+    layer_s       :: Union{Nothing, Index}    # set by bilayer/multilayer constructors
+    sublattice_s  :: Union{Nothing, Index}    # set by kagomé/Lieb constructors
+    aux_side :: Symbol                        # :pre (aux at front) or :post (aux at back)
     # ---- lazy caches (invalidated whenever mpo changes) ----
     _tn_cache      :: Union{Nothing, Vector{MPO}}   # MPO Chebyshev list (mode=:mpo)
     _tn_mps_cache  :: Union{Nothing, Vector{MPS}}   # MPS Chebyshev list (mode=:mps)
@@ -51,17 +52,23 @@ mutable struct TBHamiltonian
     _density_cache :: Union{Nothing, MPO}
 end
 
-# Backward-compatible 14-arg constructor (pre-_tn_mps_cache callers); inserts _tn_mps_cache=nothing.
+# Backward-compatible 15-arg constructor (pre-sublattice_s callers); inserts sublattice_s=nothing.
+TBHamiltonian(L, N, sites, mpo, geometry, scale, center,
+              spin_s, nambu_s, layer_s, aux_side, _tn_cache, _tn_mps_cache, _tn_Ncheb, _density_cache) =
+    TBHamiltonian(L, N, sites, mpo, geometry, scale, center,
+                  spin_s, nambu_s, layer_s, nothing, aux_side, _tn_cache, _tn_mps_cache, _tn_Ncheb, _density_cache)
+
+# Backward-compatible 14-arg constructor (pre-sublattice_s, pre-_tn_mps_cache callers).
 TBHamiltonian(L, N, sites, mpo, geometry, scale, center,
               spin_s, nambu_s, layer_s, aux_side, _tn_cache, _tn_Ncheb, _density_cache) =
     TBHamiltonian(L, N, sites, mpo, geometry, scale, center,
-                  spin_s, nambu_s, layer_s, aux_side, _tn_cache, nothing, _tn_Ncheb, _density_cache)
+                  spin_s, nambu_s, layer_s, nothing, aux_side, _tn_cache, nothing, _tn_Ncheb, _density_cache)
 
-# Backward-compatible 13-arg constructor (pre-aux_side callers); defaults to :pre.
+# Backward-compatible 13-arg constructor (pre-sublattice_s, pre-aux_side callers); defaults to :pre.
 TBHamiltonian(L, N, sites, mpo, geometry, scale, center,
               spin_s, nambu_s, layer_s, _tn_cache, _tn_Ncheb, _density_cache) =
     TBHamiltonian(L, N, sites, mpo, geometry, scale, center,
-                  spin_s, nambu_s, layer_s, :pre, _tn_cache, nothing, _tn_Ncheb, _density_cache)
+                  spin_s, nambu_s, layer_s, nothing, :pre, _tn_cache, nothing, _tn_Ncheb, _density_cache)
 
 # ============================================================
 # Cache management
@@ -119,6 +126,13 @@ Supported geometry strings
 | `"square_2d"` | hopping amplitude `t::Number`  | `Lx`, `Ly` (default `L÷2` each) |
 | `"haldane"`   | `(t2, phi, M)` NamedTuple      | `rs` (N×2 Float64 position matrix, required) |
 | `"custom"`    | hopping function `f(i,j)`      | `geometry`, `scale` (required), `type` |
+| `"kagome"`    | hopping amplitude `t::Number`  | `Lx`, `Ly`; 3-atom unit cell, sublattice index postpended |
+| `"lieb"`      | hopping amplitude `t::Number`  | `Lx`, `Ly`; 3-atom unit cell, sublattice index postpended |
+
+For `"kagome"` and `"lieb"`, `L = Lx + Ly` counts only the position qubits;
+the total atom count is `3 × 2^L`.  The sublattice index is stored in
+`H.sublattice_s` with `H.aux_side = :post`.  `H.geometry` returns the full
+real-space position of each atom (1-indexed over all `3 × 2^L` atoms).
 
 Common keyword arguments
 ------------------------
@@ -161,7 +175,11 @@ function get_Hamiltonian(geometry::String, params;
     elseif geometry == "custom"
         return _build_custom(params, L, N, sites; scale, tol, maxdim, kwargs...)
 
-    # ---- new preset models routed through build_hamiltonian ----
+    # ---- multi-atom unit-cell lattices (kagomé, Lieb) ----
+    elseif geometry in ("kagome", "lieb")
+        return _build_sublattice(geometry, params, L; scale, tol, maxdim, kwargs...)
+
+    # ---- preset models routed through build_hamiltonian ----
     elseif geometry in ("ssh", "aah", "uniform",
                         "square_2d", "hex_2d", "triangular_2d",
                         "chern8", "chernhex", "qc2dsquare")
@@ -171,7 +189,8 @@ function get_Hamiltonian(geometry::String, params;
         known = ("chain_1d", "haldane", "custom",
                  "uniform", "ssh", "aah",
                  "square_2d", "hex_2d", "triangular_2d",
-                 "chern8", "chernhex", "qc2dsquare")
+                 "chern8", "chernhex", "qc2dsquare",
+                 "kagome", "lieb")
         error("Unknown geometry \"$geometry\". Supported: $(join(known, ", ")).")
     end
 end
@@ -299,6 +318,24 @@ function _build_preset(geometry, params, L, N, sites;
     geom = _preset_geometry(geometry, dim == 2 ? 2^get(kwargs, :Lx, L ÷ 2) : nothing)
     return TBHamiltonian(L, N, mpo_sites, mpo, geom, Float64(sc), 0.0, nothing, nothing, nothing, nothing, 0, nothing)
 end
+
+function _build_sublattice(geometry, params, L;
+                            scale=nothing, tol=1e-8, maxdim=200, kwargs...)
+    Lx = get(kwargs, :Lx, L ÷ 2)
+    Ly = get(kwargs, :Ly, L - Lx)
+    t  = params isa Number                                           ? params      :
+         params isa NamedTuple && hasfield(typeof(params), :t)      ? params.t    :
+         params isa AbstractDict && haskey(params, :t)              ? params[:t]  : 1.0
+
+    H = geometry == "kagome" ? kagome_hamiltonian(Lx, Ly, t; cutoff=tol, maxdim=maxdim) :
+                                lieb_hamiltonian(  Lx, Ly, t; cutoff=tol, maxdim=maxdim)
+
+    rs         = geometry == "kagome" ? kagome_positions(Lx, Ly) : lieb_positions(Lx, Ly)
+    H.geometry = let m = rs; i -> m[i, :]; end
+    isnothing(scale) || (H.scale = Float64(scale))
+    return H
+end
+
 
 function _preset_geometry(geometry, Nx)
     geometry in ("uniform", "ssh", "aah", "chain_1d") && return _chain_geometry()
@@ -445,9 +482,10 @@ function add_hopping!(H::TBHamiltonian, f;
                       tol              = 1e-8,
                       type             = ComplexF64,
                       apply_kwargs     = NamedTuple())
-    H.spin_s === nothing && H.nambu_s === nothing && H.layer_s === nothing ||
+    H.spin_s === nothing && H.nambu_s === nothing &&
+        H.layer_s === nothing && H.sublattice_s === nothing ||
         error("add_hopping! must be called before add_spin!/add_superconductivity! " *
-              "and cannot be used on layered Hamiltonians (layer index already prepended).")
+              "and cannot be used on layered or sublattice Hamiltonians.")
     pos_s    = _pos_sites(H)
     new_term = if f isa Number
         kineticNNN(H.L, pos_s, f * MPO(pos_s, "Id"), nn; apply_kwargs)
@@ -499,9 +537,10 @@ layer) indices regardless of whether they sit at the front or back of `H.sites`.
 """
 function _pos_sites(H::TBHamiltonian)
     aux = Index[]
-    isnothing(H.spin_s)  || push!(aux, H.spin_s)
-    isnothing(H.nambu_s) || push!(aux, H.nambu_s)
-    isnothing(H.layer_s) || push!(aux, H.layer_s)
+    isnothing(H.spin_s)       || push!(aux, H.spin_s)
+    isnothing(H.nambu_s)      || push!(aux, H.nambu_s)
+    isnothing(H.layer_s)      || push!(aux, H.layer_s)
+    isnothing(H.sublattice_s) || push!(aux, H.sublattice_s)
     aux_set = Set(aux)
     return filter(s -> s ∉ aux_set, H.sites)
 end
@@ -780,7 +819,8 @@ function Base.show(io::IO, H::TBHamiltonian)
     geom_str = isnothing(H.geometry) ? "no geometry" :
                "$(H.N) sites, $(length(H.geometry(1)))D"
     aux_str  = ""
-    H.layer_s !== nothing && (aux_str *= " +$(ITensors.dim(H.layer_s))layers")
+    H.layer_s       !== nothing && (aux_str *= " +$(ITensors.dim(H.layer_s))layers")
+    H.sublattice_s  !== nothing && (aux_str *= " +$(ITensors.dim(H.sublattice_s))sublattices")
     H.spin_s  !== nothing && (aux_str *= " +spin")
     H.nambu_s !== nothing && (aux_str *= " +BdG")
     sc_str = H.scale == 0.0 ? "scale=auto" :
