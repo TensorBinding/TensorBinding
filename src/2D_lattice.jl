@@ -1004,6 +1004,113 @@ end
 
 
 # ============================================================
+# 8c. Honeycomb sublattice lattice
+# ============================================================
+
+"""
+    honeycomb_sublattice_positions(Lx, Ly) -> Matrix{Float64}
+
+Return the (2·2^L × 2) real-space atom-position matrix for a honeycomb
+lattice of 2^Lx × 2^Ly unit cells (L = Lx+Ly), consistent with the MPO
+site ordering.
+
+For total 1-indexed site i:
+  n_cell = (i-1) ÷ 2          (0-indexed unit cell, row-major)
+  s      = (i-1) % 2 + 1      (sublattice: A=1, B=2)
+  ix = n_cell % Nx,  iy = n_cell ÷ Nx
+
+Atom positions (triangular Bravais vectors a₁=(1,0), a₂=(½,√3/2)):
+  A: (ix + iy/2,       iy·√3/2          )
+  B: (ix + iy/2 + ½,   iy·√3/2 + √3/6  )   displaced along the intra-cell bond
+"""
+function honeycomb_sublattice_positions(Lx::Int, Ly::Int)
+    Nx    = 2^Lx
+    N_uc  = 2^(Lx + Ly)
+    rs    = Matrix{Float64}(undef, 2 * N_uc, 2)
+    sq3_2 = sqrt(3) / 2
+    sq3_6 = sqrt(3) / 6
+    for n in 0:N_uc-1
+        ix   = n % Nx
+        iy   = n ÷ Nx
+        ax   = ix + iy * 0.5
+        ay   = iy * sq3_2
+        base = 2n + 1
+        rs[base,   :] = [ax,        ay         ]   # A
+        rs[base+1, :] = [ax + 0.5,  ay + sq3_6 ]   # B
+    end
+    return rs
+end
+
+
+"""
+    honeycomb_sublattice_hamiltonian(Lx, Ly[, t]; cutoff, maxdim) -> TBHamiltonian
+
+Build a uniform honeycomb tight-binding Hamiltonian with an explicit 2-component
+sublattice index, as a `TBHamiltonian`.
+
+**Encoding** (L+1 sites total, L = Lx+Ly):
+- Sites 1…L : L position qubits for 2^L unit cells on a triangular Bravais lattice
+              (row-major: n = ix + iy·2^Lx)
+- Site  L+1 : dim-2 "Honeycomb" sublattice index (A=1, B=2), postpended
+
+**Hopping structure** (uniform amplitude `t`):
+
+*Intra-cell* — one bond per unit cell:
+  A-B  (same unit cell)
+
+*Inter-cell*:
+  x (shift +1 ): B(n) ↔ A(n+1)  — break at ix=Nx-1
+  y (shift +Nx): B(n) ↔ A(n+Nx) — no x-break needed (pure y step)
+
+The spectrum has two Dirac cones touching at E=0 (gapless for uniform t).
+Use `honeycomb_sublattice_positions(Lx, Ly)` for real-space atom coordinates.
+The sublattice index is stored in `H.sublattice_s`; `H.aux_side = :post`.
+"""
+function honeycomb_sublattice_hamiltonian(Lx::Integer, Ly::Integer, t::Number = 1.0;
+                                           cutoff::Real = 1e-8,
+                                           maxdim::Int  = 200)
+    Nx = 2^Lx
+    L  = Lx + Ly
+    N  = 2^L
+
+    pos_sites = siteinds("Qubit", L)
+    hc_s      = Index(2, "Honeycomb")
+    all_sites = [pos_sites; hc_s]
+
+    ku   = generate_kin_u(pos_sites, N)
+    kd   = generate_kin_d(pos_sites, N)
+    Id   = MPO(pos_sites, "Id")
+    apkw = (; cutoff = cutoff, maxdim = maxdim)
+
+    brk_xp = _row_break_mpo(Lx, Ly, pos_sites; which=:xplus)
+
+    # ── Intra-cell: A↔B within the same unit cell ────────────────────────────
+    H_intra = postpend_op(Id, hc_s, t * Float64[0 1; 1 0])
+
+    # ── Inter-cell x: B(n) ↔ A(n+1), shift ±1 ───────────────────────────────
+    # Break suppresses B(Nx-1) ↔ A(0) wrap-around across row boundary
+    H_x = +(t        * postpend_op(apply(brk_xp, ku;  apkw...), hc_s, 2, 1),
+             conj(t) * postpend_op(apply(kd, brk_xp; apkw...), hc_s, 1, 2); cutoff=cutoff)
+
+    # ── Inter-cell y: B(n) ↔ A(n+Nx), shift ±Nx ─────────────────────────────
+    ku_y = compose_power(ku, Nx; apply_kwargs=apkw)
+    kd_y = compose_power(kd, Nx; apply_kwargs=apkw)
+    H_y  = +(t        * postpend_op(ku_y, hc_s, 2, 1),
+              conj(t) * postpend_op(kd_y, hc_s, 1, 2); cutoff=cutoff)
+
+    # ── Assembly ───────────────────────────────────────────────────────────────
+    H_total = +(H_intra, H_x;    cutoff=cutoff)
+    H_total = +(H_total, H_y;    cutoff=cutoff)
+    ITensorMPS.truncate!(H_total; maxdim=maxdim, cutoff=cutoff)
+
+    # Honeycomb spectrum: Dirac bands at ±3t bandwidth
+    scale = 3.5 * abs(t)
+    return TBHamiltonian(L, N, all_sites, H_total, nothing, scale, 0.0,
+                         nothing, nothing, nothing, hc_s, :post, nothing, nothing, 0, nothing)
+end
+
+
+# ============================================================
 # 9. Antiferromagnetic / Néel initial-guess density matrices
 #    Used as seeds for mean-field SCF on interacting models.
 #    Return (density_MPO, density_MPS).
