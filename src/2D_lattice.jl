@@ -1111,6 +1111,133 @@ end
 
 
 # ============================================================
+# 8d. Dice (T3) lattice
+# ============================================================
+
+"""
+    dice_positions(Lx, Ly) -> Matrix{Float64}
+
+Return the (3·2^L × 2) real-space atom-position matrix for a dice (T3)
+lattice of 2^Lx × 2^Ly unit cells (L = Lx+Ly), consistent with the MPO
+site ordering.
+
+For total 1-indexed site i:
+  n_cell = (i-1) ÷ 3          (0-indexed unit cell, row-major)
+  s      = (i-1) % 3 + 1      (sublattice: A=1 hub, B=2 rim, C=3 rim)
+  ix = n_cell % Nx,  iy = n_cell ÷ Nx
+
+Atom positions (triangular Bravais vectors a₁=(1,0), a₂=(½,√3/2)):
+  A: (ix + iy/2,        iy·√3/2        )   at 0·(a₁+a₂)/3
+  B: (ix + iy/2 + ½,    iy·√3/2 + √3/6)   at 1·(a₁+a₂)/3
+  C: (ix + iy/2 + 1,    iy·√3/2 + √3/3)   at 2·(a₁+a₂)/3
+"""
+function dice_positions(Lx::Int, Ly::Int)
+    Nx    = 2^Lx
+    N_uc  = 2^(Lx + Ly)
+    rs    = Matrix{Float64}(undef, 3 * N_uc, 2)
+    sq3_2 = sqrt(3) / 2
+    sq3_6 = sqrt(3) / 6
+    sq3_3 = sqrt(3) / 3
+    for n in 0:N_uc-1
+        ix   = n % Nx
+        iy   = n ÷ Nx
+        ax   = ix + iy * 0.5
+        ay   = iy * sq3_2
+        base = 3n + 1
+        rs[base,   :] = [ax,        ay        ]   # A: origin
+        rs[base+1, :] = [ax + 0.5,  ay + sq3_6]   # B: (a1+a2)/3
+        rs[base+2, :] = [ax + 1.0,  ay + sq3_3]   # C: 2(a1+a2)/3
+    end
+    return rs
+end
+
+
+"""
+    dice_hamiltonian(Lx, Ly[, t]; cutoff, maxdim) -> TBHamiltonian
+
+Build a uniform dice (T3) tight-binding Hamiltonian as a `TBHamiltonian`.
+
+**Encoding** (L+1 sites total, L = Lx+Ly):
+- Sites 1…L : L position qubits for 2^L unit cells on a triangular Bravais lattice
+              (row-major: n = ix + iy·2^Lx)
+- Site  L+1 : dim-3 "Dice" sublattice index (A=1 hub, B=2 rim, C=3 rim), postpended
+
+**Hopping structure** (uniform amplitude `t`):
+
+*Intra-cell* — hub A connects to rim B only:
+  A-B
+
+*Inter-cell* — all bonds connect rim to hub A:
+  x    (shift +1   ): B(n) ↔ A(n+1)    — break at ix=Nx-1
+  x    (shift +1   ): C(n) ↔ A(n+1)    — break at ix=Nx-1
+  y    (shift +Nx  ): B(n) ↔ A(n+Nx)   — pure y step, no break
+  y    (shift +Nx  ): C(n) ↔ A(n+Nx)   — pure y step, no break
+  diag (shift +Nx-1): C(n) ↔ A(n+Nx-1) — break at ix=0
+
+Coordination: A=6, B=3, C=3.
+Use `dice_positions(Lx, Ly)` for real-space atom coordinates.
+The sublattice index is stored in `H.sublattice_s`; `H.aux_side = :post`.
+"""
+function dice_hamiltonian(Lx::Integer, Ly::Integer, t::Number = 1.0;
+                           cutoff::Real = 1e-8,
+                           maxdim::Int  = 200)
+    Nx = 2^Lx
+    L  = Lx + Ly
+    N  = 2^L
+
+    pos_sites = siteinds("Qubit", L)
+    dice_s    = Index(3, "Dice")
+    all_sites = [pos_sites; dice_s]
+
+    ku   = generate_kin_u(pos_sites, N)
+    kd   = generate_kin_d(pos_sites, N)
+    Id   = MPO(pos_sites, "Id")
+    apkw = (; cutoff = cutoff, maxdim = maxdim)
+
+    brk_xp = _row_break_mpo(Lx, Ly, pos_sites; which=:xplus)   # zeros ix = Nx-1
+    brk_xn = _row_break_mpo(Lx, Ly, pos_sites; which=:xplain)  # zeros ix = 0
+
+    # ── Intra-cell: A↔B only (no A-C intra-cell bond) ────────────────────────
+    H_intra = postpend_op(Id, dice_s, t * Float64[0 1 0; 1 0 0; 0 0 0])
+
+    # ── Inter-cell x: B(n) ↔ A(n+1) and C(n) ↔ A(n+1), shift ±1 ─────────────
+    # Break suppresses rim(Nx-1) ↔ A(0) wrap-around across row boundary
+    H_xB = +(t        * postpend_op(apply(brk_xp, ku;  apkw...), dice_s, 2, 1),
+              conj(t) * postpend_op(apply(kd, brk_xp; apkw...), dice_s, 1, 2); cutoff=cutoff)
+    H_xC = +(t        * postpend_op(apply(brk_xp, ku;  apkw...), dice_s, 3, 1),
+              conj(t) * postpend_op(apply(kd, brk_xp; apkw...), dice_s, 1, 3); cutoff=cutoff)
+
+    # ── Inter-cell y: B(n) ↔ A(n+Nx) and C(n) ↔ A(n+Nx), shift ±Nx ──────────
+    ku_y = compose_power(ku, Nx; apply_kwargs=apkw)
+    kd_y = compose_power(kd, Nx; apply_kwargs=apkw)
+    H_yB = +(t        * postpend_op(ku_y, dice_s, 2, 1),
+              conj(t) * postpend_op(kd_y, dice_s, 1, 2); cutoff=cutoff)
+    H_yC = +(t        * postpend_op(ku_y, dice_s, 3, 1),
+              conj(t) * postpend_op(kd_y, dice_s, 1, 3); cutoff=cutoff)
+
+    # ── Inter-cell diagonal: C(n) ↔ A(n+Nx+1), shift ±(Nx+1) ────────────────
+    # Break suppresses C(ix=Nx-1) ↔ A(ix=0) spurious wrap-around across row boundary
+    ku_d = compose_power(ku, Nx + 1; apply_kwargs=apkw)
+    kd_d = compose_power(kd, Nx + 1; apply_kwargs=apkw)
+    H_dC = +(t        * postpend_op(apply(brk_xp, ku_d; apkw...), dice_s, 3, 1),
+              conj(t) * postpend_op(apply(kd_d, brk_xp; apkw...), dice_s, 1, 3); cutoff=cutoff)
+
+    # ── Assembly ───────────────────────────────────────────────────────────────
+    H_total = +(H_intra, H_xB;  cutoff=cutoff)
+    H_total = +(H_total, H_xC;  cutoff=cutoff)
+    H_total = +(H_total, H_yB;  cutoff=cutoff)
+    H_total = +(H_total, H_yC;  cutoff=cutoff)
+    H_total = +(H_total, H_dC;  cutoff=cutoff)
+    ITensorMPS.truncate!(H_total; maxdim=maxdim, cutoff=cutoff)
+
+    # Dice spectrum: flat band at 0, dispersive bands; conservative scale
+    scale = 4.5 * abs(t)
+    return TBHamiltonian(L, N, all_sites, H_total, nothing, scale, 0.0,
+                         nothing, nothing, nothing, dice_s, :post, nothing, nothing, 0, nothing)
+end
+
+
+# ============================================================
 # 9. Antiferromagnetic / Néel initial-guess density matrices
 #    Used as seeds for mean-field SCF on interacting models.
 #    Return (density_MPO, density_MPS).
