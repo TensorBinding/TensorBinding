@@ -175,8 +175,8 @@ function get_Hamiltonian(geometry::String, params;
     elseif geometry == "custom"
         return _build_custom(params, L, N, sites; scale, tol, maxdim, kwargs...)
 
-    # ---- multi-atom unit-cell lattices (kagomé, Lieb) ----
-    elseif geometry in ("kagome", "lieb")
+    # ---- multi-atom unit-cell lattices (kagomé, Lieb, honeycomb) ----
+    elseif geometry in ("kagome", "lieb", "honeycomb", "dice")
         return _build_sublattice(geometry, params, L; scale, tol, maxdim, kwargs...)
 
     # ---- preset models routed through build_hamiltonian ----
@@ -190,7 +190,7 @@ function get_Hamiltonian(geometry::String, params;
                  "uniform", "ssh", "aah",
                  "square_2d", "hex_2d", "triangular_2d",
                  "chern8", "chernhex", "qc2dsquare",
-                 "kagome", "lieb")
+                 "kagome", "lieb", "honeycomb", "dice")
         error("Unknown geometry \"$geometry\". Supported: $(join(known, ", ")).")
     end
 end
@@ -327,10 +327,15 @@ function _build_sublattice(geometry, params, L;
          params isa NamedTuple && hasfield(typeof(params), :t)      ? params.t    :
          params isa AbstractDict && haskey(params, :t)              ? params[:t]  : 1.0
 
-    H = geometry == "kagome" ? kagome_hamiltonian(Lx, Ly, t; cutoff=tol, maxdim=maxdim) :
-                                lieb_hamiltonian(  Lx, Ly, t; cutoff=tol, maxdim=maxdim)
+    H = geometry == "kagome"    ? kagome_hamiltonian(               Lx, Ly, t; cutoff=tol, maxdim=maxdim) :
+        geometry == "lieb"      ? lieb_hamiltonian(                Lx, Ly, t; cutoff=tol, maxdim=maxdim) :
+        geometry == "dice"      ? dice_hamiltonian(                Lx, Ly, t; cutoff=tol, maxdim=maxdim) :
+                                  honeycomb_sublattice_hamiltonian(Lx, Ly, t; cutoff=tol, maxdim=maxdim)
 
-    rs         = geometry == "kagome" ? kagome_positions(Lx, Ly) : lieb_positions(Lx, Ly)
+    rs         = geometry == "kagome"    ? kagome_positions(                 Lx, Ly) :
+                 geometry == "lieb"      ? lieb_positions(                   Lx, Ly) :
+                 geometry == "dice"      ? dice_positions(                   Lx, Ly) :
+                                          honeycomb_sublattice_positions(    Lx, Ly)
     H.geometry = let m = rs; i -> m[i, :]; end
     isnothing(scale) || (H.scale = Float64(scale))
     return H
