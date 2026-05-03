@@ -487,6 +487,192 @@ end
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Spatial LDOS at multiple x-positions (real-space analogue of get_bands)
+# ─────────────────────────────────────────────────────────────────────────────
+
+"""
+    get_ldos_spatial(H, Ncheb, ω_phys_vals;
+                     num_x, num_avg, mode, x_start, x_end,
+                     x_groups, kernel, lambda, maxdim, cutoff, verbose)
+        -> Matrix{Float64}  (Nω × num_x)
+
+Spatially-resolved LDOS at `num_x` coarse positions with optional local averaging,
+mirroring the `get_bands` interface.
+
+**Sampling parameters**
+
+- `num_x`    : number of coarse sample positions (default `H.N` = all sites).
+- `num_avg`  : number of sub-samples per coarse position for local averaging
+               (default `1` = no averaging).  The coarse block of width
+               `dx = (x_end−x_start+1) ÷ num_x` is sampled at `num_avg` evenly-
+               spaced sub-positions separated by `dx ÷ num_avg`.
+- `x_start`, `x_end` : 1-indexed range to sample (defaults: `1` and `H.N`).
+- `x_groups` : explicit `Vector{Vector{Int}}` override (bypasses `num_x`/`num_avg`).
+
+**Modes**
+
+- `:mpo` (default) — single online MPO Chebyshev recursion; at each step the
+  diagonal of `T_n` is extracted as an MPS and evaluated at every position
+  simultaneously.  3 MPOs alive; cost `∝ Ncheb × (MPO×MPO)`, independent of
+  `num_x`.  Preferred for typical use (compact Hamiltonian MPO, many positions).
+
+- `:mps` — independent MPS Chebyshev recursion per position.
+  3 MPS alive per run; cost `∝ N_total_positions × Ncheb × (MPO×MPS)`.
+  Use for very large systems where the MPO×MPO step is too expensive.
+
+**`x` convention**: 1-indexed, `x ∈ {1,…,2^L}`.
+Exciton: evaluation state is `|x,x⟩`.
+
+Examples
+--------
+```julia
+# All sites, no averaging, MPS mode
+ldos(x) = get_ldos_spatial(H, 200, ωlist)
+
+# 16 coarse points, each averaged over 4 neighbours
+ldos(x) = get_ldos_spatial(H, 200, ωlist; num_x=16, num_avg=4)
+
+# Same with explicit groups
+groups = [[x + k for k in 0:3] for x in 1:8:H.N]
+ldos(x) = get_ldos_spatial(H, 200, ωlist; x_groups=groups)
+```
+"""
+function get_ldos_spatial(H::TBHamiltonian, Ncheb::Int, ω_phys_vals;
+                           num_x::Int     = H.N,
+                           num_avg::Int   = 1,
+                           mode::Symbol   = :mpo,
+                           x_start::Int   = 1,
+                           x_end::Int     = H.N,
+                           x_groups       = nothing,
+                           kernel::Symbol = :jackson,
+                           lambda::Real   = 4.0,
+                           maxdim::Int    = 100,
+                           cutoff::Real   = 1e-8,
+                           verbose::Bool  = false)
+
+    # ── Build x_groups from num_x / num_avg if not provided explicitly ────────
+    groups = if x_groups !== nothing
+        x_groups isa AbstractVector{<:AbstractVector} ?
+            collect.(x_groups) : [[x] for x in x_groups]
+    else
+        window  = x_end - x_start + 1
+        dx      = window ÷ num_x
+        dx_sub  = max(1, dx ÷ num_avg)
+        [[ x_start + (i-1)*dx + k*dx_sub
+           for k in 0:num_avg-1
+           if x_start + (i-1)*dx + k*dx_sub <= x_end ]
+         for i in 1:num_x]
+    end
+
+    _ensure_scale!(H)
+
+    I_mpo = MPO(H.sites, "Id")
+    Ham_n = (1 / H.scale) * +(H.mpo, (-H.center) * I_mpo; cutoff=cutoff)
+
+    ω_vals = (collect(ω_phys_vals) .- H.center) ./ H.scale
+    Nω     = length(ω_vals)
+    W      = _kpm_weight_matrix(Ncheb, ω_vals; kernel=kernel, lambda=lambda)
+    valid  = [abs(ω) < 1.0 for ω in ω_vals]
+
+    ng    = length(groups)
+    result = zeros(Float64, Nω, ng)
+    L_tot  = length(H.sites)
+
+    # ── Helper: build evaluation MPS for position x ───────────────────────────
+    make_psi(x) = L_tot == H.L ? binary_to_MPS(x - 1, H.L, H.sites) :
+                                  mpsexciton(x, H.sites)
+
+    if mode == :mps
+        # ── MPS mode: one independent recursion per position ─────────────────
+        n_total = sum(length(g) for g in groups)
+        n_done  = 0
+
+        for (ig, grp) in enumerate(groups)
+            grp_accum = zeros(Float64, Nω)
+
+            for x in grp
+                psi0  = make_psi(x)
+                accum = zeros(Float64, Nω)
+
+                function kpm_accum!(phi, n)
+                    mu = real(inner(psi0, phi))
+                    for iω in 1:Nω
+                        valid[iω] || continue
+                        accum[iω] += W[n, iω] * mu
+                    end
+                end
+
+                phi_km2 = psi0
+                phi_km1 = apply(Ham_n, psi0; cutoff=cutoff, maxdim=maxdim)
+                kpm_accum!(phi_km2, 1);  kpm_accum!(phi_km1, 2)
+
+                for k in 3:Ncheb
+                    phi_k = +(2 * apply(Ham_n, phi_km1; cutoff=cutoff, maxdim=maxdim),
+                              -phi_km2; cutoff=cutoff, maxdim=maxdim)
+                    kpm_accum!(phi_k, k)
+                    phi_km2 = phi_km1
+                    phi_km1 = phi_k
+                end
+
+                for iω in 1:Nω
+                    valid[iω] || continue
+                    grp_accum[iω] += accum[iω] / (π^2 * Ncheb * sqrt(1 - ω_vals[iω]^2))
+                end
+
+                n_done += 1
+                verbose && n_done % 15 == 0 &&
+                    println("get_ldos_spatial [:mps]  group $ig/$ng  x=$x  " *
+                            "($n_done/$n_total)  maxlinkdim=$(maxlinkdim(phi_km1))")
+            end
+
+            result[:, ig] = grp_accum ./ length(grp)
+        end
+
+    elseif mode == :mpo
+        # ── MPO mode: single online Chebyshev pass, evaluate diagonal at all x ─
+        # Pre-build all evaluation states (one per unique position)
+        all_xs   = unique(vcat(groups...))
+        psi_dict = Dict(x => make_psi(x) for x in all_xs)
+        accum    = zeros(Float64, Nω, ng)   # [iω, ig]
+
+        function accumulate_Tn!(Tk, n)
+            diag_n = ITensorMPS.truncate!(extract_diagonal_to_mps(Tk); cutoff=cutoff)
+            for (ig, grp) in enumerate(groups)
+                s = sum(real(inner(psi_dict[x], diag_n)) for x in grp) / length(grp)
+                for iω in 1:Nω
+                    valid[iω] || continue
+                    accum[iω, ig] += W[n, iω] * s
+                end
+            end
+        end
+
+        Tkm2 = I_mpo;  Tkm1 = Ham_n
+        accumulate_Tn!(Tkm2, 1);  accumulate_Tn!(Tkm1, 2)
+
+        for k in 3:Ncheb
+            Tk   = +(2 * apply(Ham_n, Tkm1; cutoff=cutoff), -Tkm2; maxdim=maxdim)
+            Tk   = ITensorMPS.truncate!(Tk; cutoff=cutoff)
+            accumulate_Tn!(Tk, k)
+            Tkm2 = Tkm1;  Tkm1 = Tk
+            verbose && (k % 15 == 0 || k == Ncheb) &&
+                println("get_ldos_spatial [:mpo]  step $k/$Ncheb  " *
+                        "maxlinkdim=$(maxlinkdim(Tkm1))")
+        end
+
+        for iω in 1:Nω
+            valid[iω] || continue
+            result[iω, :] = accum[iω, :] ./ (π^2 * Ncheb * sqrt(1 - ω_vals[iω]^2))
+        end
+
+    else
+        error("Unknown mode :$mode. Choose :mps or :mpo")
+    end
+
+    return result
+end
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Stochastic full DOS (trace estimation via random diagonal sampling)
 # ─────────────────────────────────────────────────────────────────────────────
 
