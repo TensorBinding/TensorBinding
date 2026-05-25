@@ -108,14 +108,169 @@ end
 Apply an interaction kernel MPO to a density profile and convert the resulting
 coefficient MPS into a diagonal Hartree MPO.
 """
+function _scf_subtract_background(density_mps::MPS, sites, background;
+                                  maxdim::Int, cutoff::Real)
+    background === nothing && return density_mps
+    bg = background isa MPS ? background :
+         background isa Number ? scf_constant_mps(collect(sites), background) :
+         error("Unsupported SCF background type $(typeof(background)); use nothing, Number, or MPS.")
+    return +(density_mps, -bg; maxdim=maxdim, cutoff=cutoff)
+end
+
 function scf_hartree_mpo_from_density(density_mps::MPS, interaction_op::MPO, sites;
                                       background = nothing,
                                       maxdim::Int = 100,
                                       cutoff::Real = 1e-8)
-    rho = background === nothing ? density_mps :
-          +(density_mps, -background; maxdim=maxdim, cutoff=cutoff)
+    rho = _scf_subtract_background(density_mps, sites, background;
+                                   maxdim=maxdim, cutoff=cutoff)
     coeff_mps = apply(interaction_op, rho; maxdim=maxdim, cutoff=cutoff)
     return mps_to_diagonal_mpo(coeff_mps, sites)
+end
+
+"""
+    scf_dense_interaction_mpo(L, sites, V; type=Float64, tol=1e-8) -> MPO
+
+Compress a dense long-range interaction kernel `V(i, j)` into an MPO. The
+kernel is sampled on 0-indexed coordinates `i, j = 0, ..., 2^L-1` using a
+2D interleaved QTCI train, then each pair of quantics legs is merged into the
+bra/ket legs of an MPO on `sites`.
+"""
+function scf_dense_interaction_mpo(L::Int, sites, V;
+                                   type=Float64,
+                                   tol::Real=1e-8,
+                                   kwargs...)
+    N = 1 << L
+    xvals = range(0, N - 1; length=N)
+    kernel = (x, y) -> V(round(Int, x), round(Int, y))
+    qtt, _, _ = quanticscrossinterpolate(type, kernel, [xvals, xvals];
+                                         tolerance=tol, kwargs...)
+    tt = TensorCrossInterpolation.tensortrain(qtt.tci)
+    return custom_mpo(MPS(tt), sites)
+end
+
+"""
+    scf_dense_hartree_builder(V, L, sites; background=nothing, kwargs...)
+
+Return a Hartree builder backed by a dense interaction kernel. `V` can be an
+existing interaction MPO or a function `V(i, j)` on 0-indexed coordinates.
+"""
+function scf_dense_hartree_builder(V, L::Int, sites;
+                                   background = nothing,
+                                   type=Float64,
+                                   tol::Real=1e-8,
+                                   maxdim::Int=100,
+                                   cutoff::Real=1e-8,
+                                   kwargs...)
+    interaction_op = V isa MPO ? V :
+                     scf_dense_interaction_mpo(L, sites, V;
+                                               type=type, tol=tol, kwargs...)
+    return function (density_mps::MPS, density_sites)
+        return scf_hartree_mpo_from_density(density_mps, interaction_op, density_sites;
+                                            background=background,
+                                            maxdim=maxdim,
+                                            cutoff=cutoff)
+    end
+end
+
+function _scf_distance_weight_mpo(L::Int, sites, weight;
+                                  type=Float64,
+                                  tol::Real=1e-8)
+    if weight isa MPO
+        return weight
+    elseif weight isa Number
+        return weight * MPO(sites, "Id")
+    elseif weight isa Function
+        return get_diagonal_mpo(L, sites,
+                                x -> weight(round(Int, x) - 1);
+                                type=type)
+    else
+        error("Unsupported distance-interaction weight $(typeof(weight)); use Number, Function, or MPO.")
+    end
+end
+
+function _scf_pair_term(term)
+    if term isa Pair
+        return Int(term.first), term.second
+    elseif term isa Tuple && length(term) == 2
+        return Int(term[1]), term[2]
+    else
+        error("Pair-distance terms must be `distance => weight` or `(distance, weight)`.")
+    end
+end
+
+"""
+    scf_pair_distance_interaction_mpo(L, sites, distance, weight=1; kwargs...)
+    scf_pair_distance_interaction_mpo(L, sites, terms; kwargs...)
+
+Build an interaction MPO for arbitrary fixed-distance site pairs. For a bond
+weight `w(i)` on the pair `(i, i+d)`, the operator contains
+`row=i+d,col=i` with weight `w(i)` and `row=i,col=i+d` with weight `w(i)`.
+The shifts are non-cyclic, so boundary-wrapping bonds are absent.
+"""
+function scf_pair_distance_interaction_mpo(L::Int, sites, distance::Integer, weight=1;
+                                           type=Float64,
+                                           tol::Real=1e-8,
+                                           maxdim::Int=100,
+                                           cutoff::Real=1e-8)
+    N = 1 << L
+    d = mod(Int(distance), N)
+    (d == 0 || d >= N) && error("distance must be in 1:$(N - 1), got $distance.")
+
+    D = _scf_distance_weight_mpo(L, sites, weight; type=type, tol=tol)
+    K_fwd = build_shift_mpo(sites, d, false)
+    K_bwd = build_shift_mpo(sites, N - d, false)
+
+    term_fwd = apply(K_fwd, D; maxdim=maxdim, cutoff=cutoff)
+    term_bwd = apply(D, K_bwd; maxdim=maxdim, cutoff=cutoff)
+    op = +(term_fwd, term_bwd; maxdim=maxdim, cutoff=cutoff)
+    ITensorMPS.truncate!(op; maxdim=maxdim, cutoff=cutoff)
+    return op
+end
+
+function scf_pair_distance_interaction_mpo(L::Int, sites, terms::AbstractVector;
+                                           type=Float64,
+                                           tol::Real=1e-8,
+                                           maxdim::Int=100,
+                                           cutoff::Real=1e-8)
+    isempty(terms) && error("At least one pair-distance interaction term is required.")
+    acc = nothing
+    for term in terms
+        d, weight = _scf_pair_term(term)
+        op = scf_pair_distance_interaction_mpo(L, sites, d, weight;
+                                               type=type, tol=tol,
+                                               maxdim=maxdim, cutoff=cutoff)
+        acc = acc === nothing ? op : +(acc, op; maxdim=maxdim, cutoff=cutoff)
+    end
+    ITensorMPS.truncate!(acc; maxdim=maxdim, cutoff=cutoff)
+    return acc
+end
+
+"""
+    scf_pair_distance_hartree_builder(L, sites, distance, weight=1; kwargs...)
+    scf_pair_distance_hartree_builder(L, sites, terms; kwargs...)
+
+Return a Hartree builder for sparse pair interactions generated from
+non-cyclic shift MPOs.
+"""
+function scf_pair_distance_hartree_builder(L::Int, sites, distance_or_terms, weight=1;
+                                           background = nothing,
+                                           type=Float64,
+                                           tol::Real=1e-8,
+                                           maxdim::Int=100,
+                                           cutoff::Real=1e-8)
+    interaction_op = distance_or_terms isa AbstractVector ?
+                     scf_pair_distance_interaction_mpo(L, sites, distance_or_terms;
+                                                       type=type, tol=tol,
+                                                       maxdim=maxdim, cutoff=cutoff) :
+                     scf_pair_distance_interaction_mpo(L, sites, distance_or_terms, weight;
+                                                       type=type, tol=tol,
+                                                       maxdim=maxdim, cutoff=cutoff)
+    return function (density_mps::MPS, density_sites)
+        return scf_hartree_mpo_from_density(density_mps, interaction_op, density_sites;
+                                            background=background,
+                                            maxdim=maxdim,
+                                            cutoff=cutoff)
+    end
 end
 
 """
