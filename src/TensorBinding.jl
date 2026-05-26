@@ -8,12 +8,8 @@ using ITensorMPS
 using Quantics
 using QuanticsTCI
 using QuanticsGrids
-using TCIITensorConversion
 using TensorCrossInterpolation
 import TensorCrossInterpolation as TCI
-using PyCall
-using PyPlot
-using Plots
 using FFTW
 using Base.Threads
 
@@ -48,7 +44,8 @@ include("Topology_tk.jl")
 include("Purification_tk.jl")
 include("Meanfi_tk.jl")
 include("RPA_tk.jl")
-include("RSI_tk.jl")
+include("Conductivity_tk.jl")
+include("GPU_tk.jl")
 include("krylov_tk.jl")
 include("Timeev_tk.jl")
 include("twisted_tk.jl")
