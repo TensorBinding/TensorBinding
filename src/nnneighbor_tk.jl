@@ -20,38 +20,41 @@
 
 Kinetic MPO that shifts the quantics unit-cell index by `Δix + Δiy·Nx`.
 
-- x-component: composes single-step masked x-shifts (`apply(brk_xp, ku)` for
-  forward, `apply(kd, brk_xp)` for backward) to suppress row wrap-arounds at
-  every step, following the same pattern as the 2D lattice constructors.
-- y-component: `compose_power(ku/kd, Nx·|Δiy|)` — pure y-shift, no break needed.
-- x and y act on disjoint bit groups and commute; the result is `K_y ∘ K_x`.
+- Builds the full linear displacement directly with `build_shift_mpo`.
+- A source-cell mask removes bonds whose destination would leave the finite
+  `2^Lx × 2^Ly` grid, including row wrap-arounds.
 
 `ku`, `kd`, `Id`, `brk_xp` must be pre-built from the same `pos_sites` for
-efficiency when called in a loop over multiple displacements.
+backward compatibility with the old call signature; the shift-MPO path only
+uses `Id` to recover the site indices.
 """
 function _shift_mpo(Δix::Int, Δiy::Int,
                     ku::MPO, kd::MPO, Id::MPO, brk_xp::MPO,
                     Nx::Int;
                     apkw = (; cutoff=1e-8, maxdim=100))
-    K_x = if Δix > 0
-        compose_power(apply(brk_xp, ku; apkw...), Δix; apply_kwargs=apkw)
-    elseif Δix < 0
-        compose_power(apply(kd, brk_xp; apkw...), -Δix; apply_kwargs=apkw)
-    else
-        Id
-    end
+    Δix == 0 && Δiy == 0 && return Id
 
-    K_y = if Δiy > 0
-        compose_power(ku, Nx * Δiy; apply_kwargs=apkw)
-    elseif Δiy < 0
-        compose_power(kd, Nx * (-Δiy); apply_kwargs=apkw)
-    else
-        Id
-    end
+    sites = [siteind(Id, n) for n in 1:length(Id)]
+    L = length(sites)
+    Lx = Int(round(log2(Nx)))
+    Ly = L - Lx
+    Ny = 1 << Ly
+    q = Δix + Δiy * Nx
+    q == 0 && return Id
 
-    Δix == 0 && return K_y
-    Δiy == 0 && return K_x
-    return apply(K_y, K_x; apkw...)
+    K = q > 0 ?
+        build_shift_mpo(sites, q, false) :
+        swapprime(dag(build_shift_mpo(sites, -q, false)), 0, 1)
+
+    valid_source = get_diagonal_mpo(L, sites,
+        i -> begin
+            n = round(Int, i) - 1
+            ix = n % Nx
+            iy = n ÷ Nx
+            0 <= ix + Δix < Nx && 0 <= iy + Δiy < Ny ? 1.0 : 0.0
+        end;
+        type=Float64)
+    return apply(K, valid_source; apkw...)
 end
 
 
@@ -182,8 +185,10 @@ Works for all 2D geometries registered in `get_Hamiltonian`:
 
 **Complexity**
 Shell detection uses a reference patch of `(2nn+3)²` unit cells — O(nn²) work,
-independent of system size.  MPO construction uses `compose_power` (O(log N) per
-displacement).  QTCI-based spatial modulation adds O(2^L) function evaluations.
+independent of system size.  MPO construction uses a direct `build_shift_mpo`
+per displacement, plus a simple diagonal source mask to remove finite-grid
+wrap-around bonds.  QTCI-based spatial modulation adds O(2^L) function
+evaluations.
 
 ```julia
 H = get_Hamiltonian("honeycomb_nnn", (t=1.0, t2=0.0); L=8, Lx=4, Ly=4)
