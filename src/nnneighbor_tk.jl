@@ -32,14 +32,14 @@ function _shift_mpo(dx::Int, dy::Int,
                     ku::MPO, kd::MPO, Id::MPO, brk_xp::MPO,
                     Nx::Int;
                     apkw = (; cutoff=1e-8, maxdim=100))
-    Δix == 0 && Δiy == 0 && return Id
+    dx == 0 && dy == 0 && return Id
 
     sites = [siteind(Id, n) for n in 1:length(Id)]
     L = length(sites)
     Lx = Int(round(log2(Nx)))
     Ly = L - Lx
     Ny = 1 << Ly
-    q = Δix + Δiy * Nx
+    q = dx + dy * Nx
     q == 0 && return Id
 
     K = q > 0 ?
@@ -50,8 +50,8 @@ function _shift_mpo(dx::Int, dy::Int,
         i -> begin
             n = round(Int, i) - 1
             ix = n % Nx
-            iy = n ÷ Nx
-            0 <= ix + Δix < Nx && 0 <= iy + Δiy < Ny ? 1.0 : 0.0
+            iy = div(n, Nx)
+            0 <= ix + dx < Nx && 0 <= iy + dy < Ny ? 1.0 : 0.0
         end;
         type=Float64)
     return apply(K, valid_source; apkw...)
