@@ -968,7 +968,7 @@ function kagome_hamiltonian(Lx::Integer, Ly::Integer, t::Number = 1.0;
     H_intra = postpend_op(Id, kag_s,
         Float64[0 t_AB t_AC; t_AB 0 t_BC; t_AC t_BC 0])
 
-    # -- Inter-cell x: A(n) ->B(n+1), shift +/-1 -uses t_AB -------------------
+    # -- Inter-cell x: B(n) ->A(n+1), shift +/-1 -uses t_AB -------------------
     K_x = shift_mpo(pos_sites, 1; cyclic=false)
     D_x = shift_adjoint_mpo(K_x)
     H_x = +(t_AB        * postpend_op(apply(K_x, brk_xp;  apkw...), kag_s, 1, 2),
@@ -1191,14 +1191,14 @@ function honeycomb_sublattice_hamiltonian(Lx::Integer, Ly::Integer, t::Number = 
     # Break suppresses B(Nx-1) ->A(0) wrap-around across row boundary
     K_x = shift_mpo(pos_sites, 1; cyclic=false)
     D_x = shift_adjoint_mpo(K_x)
-    H_x = +(t        * postpend_op(apply(K_x, brk_xp;  apkw...), hc_s, 2, 1),
-             conj(t) * postpend_op(apply(brk_xp, D_x; apkw...), hc_s, 1, 2); cutoff=cutoff)
+    H_x = +(t        * postpend_op(apply(K_x, brk_xp;  apkw...), hc_s, 1, 2),
+             conj(t) * postpend_op(apply(brk_xp, D_x; apkw...), hc_s, 2, 1); cutoff=cutoff)
 
     # -- Inter-cell y: B(n) ->A(n+Nx), shift +/-Nx -----------------------------
     ku_y = shift_mpo(pos_sites, Nx; cyclic=false)
     kd_y = shift_adjoint_mpo(ku_y)
-    H_y  = +(t        * postpend_op(ku_y, hc_s, 2, 1),
-              conj(t) * postpend_op(kd_y, hc_s, 1, 2); cutoff=cutoff)
+    H_y  = +(t        * postpend_op(ku_y, hc_s, 1, 2),
+              conj(t) * postpend_op(kd_y, hc_s, 2, 1); cutoff=cutoff)
 
     # -- Assembly ---------------------------------------------------------------
     H_total = +(H_intra, H_x;    cutoff=cutoff)
@@ -1263,11 +1263,11 @@ function honeycomb_nnn_hamiltonian(Lx::Integer, Ly::Integer,
     # -- NN terms (same as honeycomb_sublattice_hamiltonian) -------------------
     H_intra = postpend_op(Id, hc_s, t * Float64[0 1; 1 0])
 
-    H_x = +(t        * postpend_op(apply(K_x, brk_xp;  apkw...), hc_s, 2, 1),
-             conj(t) * postpend_op(apply(brk_xp, D_x; apkw...), hc_s, 1, 2); cutoff=cutoff)
+    H_x = +(t        * postpend_op(apply(K_x, brk_xp;  apkw...), hc_s, 1, 2),
+             conj(t) * postpend_op(apply(brk_xp, D_x; apkw...), hc_s, 2, 1); cutoff=cutoff)
 
-    H_y = +(t        * postpend_op(ku_y, hc_s, 2, 1),
-             conj(t) * postpend_op(kd_y, hc_s, 1, 2); cutoff=cutoff)
+    H_y = +(t        * postpend_op(ku_y, hc_s, 1, 2),
+             conj(t) * postpend_op(kd_y, hc_s, 2, 1); cutoff=cutoff)
 
     # -- NNN terms: sublattice matrix = I_(A->A and B->B with same amplitude) --
     I2 = Float64[1 0; 0 1]
@@ -1397,24 +1397,24 @@ function dice_hamiltonian(Lx::Integer, Ly::Integer, t::Number = 1.0;
     # -- Inter-cell x: B(n) ->A(n+1) (t_AB) and C(n) ->A(n+1) (t_AC), shift +/-1
     K_x = shift_mpo(pos_sites, 1; cyclic=false)
     D_x = shift_adjoint_mpo(K_x)
-    H_xB = +(t_AB        * postpend_op(apply(K_x, brk_xp;  apkw...), dice_s, 2, 1),
-              conj(t_AB) * postpend_op(apply(brk_xp, D_x; apkw...), dice_s, 1, 2); cutoff=cutoff)
-    H_xC = +(t_AC        * postpend_op(apply(K_x, brk_xp;  apkw...), dice_s, 3, 1),
-              conj(t_AC) * postpend_op(apply(brk_xp, D_x; apkw...), dice_s, 1, 3); cutoff=cutoff)
+    H_xB = +(t_AB        * postpend_op(apply(K_x, brk_xp;  apkw...), dice_s, 1, 2),
+              conj(t_AB) * postpend_op(apply(brk_xp, D_x; apkw...), dice_s, 2, 1); cutoff=cutoff)
+    H_xC = +(t_AC        * postpend_op(apply(K_x, brk_xp;  apkw...), dice_s, 1, 3),
+              conj(t_AC) * postpend_op(apply(brk_xp, D_x; apkw...), dice_s, 3, 1); cutoff=cutoff)
 
     # -- Inter-cell y: B(n) ->A(n+Nx) (t_AB) and C(n) ->A(n+Nx) (t_AC), shift +/-Nx
     ku_y = shift_mpo(pos_sites, Nx; cyclic=false)
     kd_y = shift_adjoint_mpo(ku_y)
-    H_yB = +(t_AB        * postpend_op(ku_y, dice_s, 2, 1),
-              conj(t_AB) * postpend_op(kd_y, dice_s, 1, 2); cutoff=cutoff)
-    H_yC = +(t_AC        * postpend_op(ku_y, dice_s, 3, 1),
-              conj(t_AC) * postpend_op(kd_y, dice_s, 1, 3); cutoff=cutoff)
+    H_yB = +(t_AB        * postpend_op(ku_y, dice_s, 1, 2),
+              conj(t_AB) * postpend_op(kd_y, dice_s, 2, 1); cutoff=cutoff)
+    H_yC = +(t_AC        * postpend_op(ku_y, dice_s, 1, 3),
+              conj(t_AC) * postpend_op(kd_y, dice_s, 3, 1); cutoff=cutoff)
 
     # -- Inter-cell diagonal: C(n) ->A(n+Nx+1) (t_AC), shift +/-(Nx+1) ---------
     ku_d = shift_mpo(pos_sites, Nx + 1; cyclic=false)
     kd_d = shift_adjoint_mpo(ku_d)
-    H_dC = +(t_AC        * postpend_op(apply(ku_d, brk_xp; apkw...), dice_s, 3, 1),
-              conj(t_AC) * postpend_op(apply(brk_xp, kd_d; apkw...), dice_s, 1, 3); cutoff=cutoff)
+    H_dC = +(t_AC        * postpend_op(apply(ku_d, brk_xp; apkw...), dice_s, 1, 3),
+              conj(t_AC) * postpend_op(apply(brk_xp, kd_d; apkw...), dice_s, 3, 1); cutoff=cutoff)
 
     # -- Assembly ---------------------------------------------------------------
     H_total = +(H_intra, H_xB;  cutoff=cutoff)
@@ -1686,7 +1686,7 @@ _geom_positions(::Val{:dice},      Lx, Ly) = dice_positions(Lx, Ly)
 _geom_n_sub(::Val{:honeycomb}) = 2
 _geom_n_sub(::Val{:kagome})    = 3
 _geom_n_sub(::Val{:lieb})      = 3
-_geom_n_sub(::Val{:dice})      = 4
+_geom_n_sub(::Val{:dice})      = 3
 
 """
     plot_ldos_2d(ldos_mat, omegalist, omega_target;

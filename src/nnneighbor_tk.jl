@@ -327,8 +327,8 @@ function add_hopping_2D!(H::TBHamiltonian, f;
         fwd, bwd = if H.sublattice_s === nothing
             amp * K_fwd_m, conj(amp) * K_bwd_m
         else
-            M_fwd = zeros(ComplexF64, n_sub, n_sub);  M_fwd[from_s, to_s  ] = 1
-            M_bwd = zeros(ComplexF64, n_sub, n_sub);  M_bwd[to_s,   from_s] = 1
+            M_fwd = zeros(ComplexF64, n_sub, n_sub);  M_fwd[to_s,   from_s] = 1
+            M_bwd = zeros(ComplexF64, n_sub, n_sub);  M_bwd[from_s, to_s  ] = 1
             amp       * postpend_op(K_fwd_m, H.sublattice_s, M_fwd),
             conj(amp) * postpend_op(K_bwd_m, H.sublattice_s, M_bwd)
         end
