@@ -620,6 +620,7 @@ function get_C(H::TBHamiltonian, xfunc=nothing, yfunc=nothing;
                fermi::Real      = 0.0,
                l                = nothing,
                Λ::Real          = 10,
+               Lambda           = nothing,  # ASCII alias for Λ
                Nchebychev::Int  = 300,
                maxdim::Int      = 500,
                cutoff::Float64  = 1e-8,
