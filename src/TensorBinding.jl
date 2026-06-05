@@ -8,12 +8,8 @@ using ITensorMPS
 using Quantics
 using QuanticsTCI
 using QuanticsGrids
-using TCIITensorConversion
 using TensorCrossInterpolation
 import TensorCrossInterpolation as TCI
-using PyCall
-using PyPlot
-using Plots
 using FFTW
 using Base.Threads
 
@@ -36,11 +32,11 @@ export MPO, MPS, OpSum, expect, inner, siteinds
 #   Timeev_tk.jl   — time evolution (uses Hamiltonian)
 #   twoparticle_tk.jl — exciton / two-particle system construction (uses TBSystem, Hamiltonian)
 
-include("utils.jl")
+include("Utils.jl")
 include("Hamiltonian.jl")
-include("2D_lattice.jl")
+include("2Dlattice_tk.jl")
 include("TBSystem.jl")
-include("nnneighbor_tk.jl")
+include("NNNeighbor_tk.jl")
 include("Flake_tk.jl")
 include("QFT_tk.jl")
 include("KPM_tk.jl")
@@ -50,12 +46,12 @@ include("SCF_tk.jl")
 include("RPA_tk.jl")
 include("NH_tk.jl")
 #include("RSI_tk.jl")
-include("krylov_tk.jl")
+include("Krylov_tk.jl")
 include("Timeev_tk.jl")
-include("twisted_tk.jl")
-include("bilayer_tk.jl")
+include("Twisted_tk.jl")
+include("Bilayer_tk.jl")
 include("Supercond_tk.jl")
 include("DMRG_tk.jl")
-include("twoparticle_tk.jl")
+include("TwoParticle_tk.jl")
 
 end

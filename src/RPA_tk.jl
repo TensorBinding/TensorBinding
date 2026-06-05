@@ -550,10 +550,14 @@ function get_bubble_mpo(H1::TBHamiltonian, H2::TBHamiltonian, ω::Real;
     P1 = _get_density_matrix(H1, ϵF, P_method, Ncheb, maxdim, cutoff,
                               purify_method, purify_maxdim, purify_maxiters,
                               purify_tol, verbose)
-    verbose && println("Polarization bubble: computing P2...")
-    P2 = _get_density_matrix(H2, ϵF, P_method, Ncheb, maxdim, cutoff,
-                              purify_method, purify_maxdim, purify_maxiters,
-                              purify_tol, verbose)
+    if H1 === H2
+        P2 = P1
+    else
+        verbose && println("Polarization bubble: computing P2...")
+        P2 = _get_density_matrix(H2, ϵF, P_method, Ncheb, maxdim, cutoff,
+                                  purify_method, purify_maxdim, purify_maxiters,
+                                  purify_tol, verbose)
+    end
 
     # ---- Numerator: I₁⊗P₂ − P₁⊗I₂ ----
     id1  = MPO(sites1, "Id")
@@ -1407,20 +1411,28 @@ function get_bubble_mpo_cheb2d(H1::TBHamiltonian, H2::TBHamiltonian,
     Tn1, _, _ = KPM_Tn(H1.mpo, Ncheb, H1.sites;
                          scale=scale1, center=center1,
                          maxdim=maxdim, cutoff=cutoff, verbose=false)
-    verbose && println("cheb2d: building T_n(H2) moments...")
-    Tn2, _, _ = KPM_Tn(H2.mpo, Ncheb, H2.sites;
-                         scale=scale2, center=center2,
-                         maxdim=maxdim, cutoff=cutoff, verbose=false)
+    if H1 === H2
+        Tn2 = Tn1
+    else
+        verbose && println("cheb2d: building T_n(H2) moments...")
+        Tn2, _, _ = KPM_Tn(H2.mpo, Ncheb, H2.sites;
+                             scale=scale2, center=center2,
+                             maxdim=maxdim, cutoff=cutoff, verbose=false)
+    end
     N = length(Tn1)   # = Ncheb + 1  (T_0 … T_Ncheb)
 
     verbose && println("cheb2d: computing P1...")
     P1 = _get_density_matrix(H1, ϵF, P_method, Ncheb, maxdim, cutoff,
                               purify_method, purify_maxdim, purify_maxiters,
                               purify_tol, verbose)
-    verbose && println("cheb2d: computing P2...")
-    P2 = _get_density_matrix(H2, ϵF, P_method, Ncheb, maxdim, cutoff,
-                              purify_method, purify_maxdim, purify_maxiters,
-                              purify_tol, verbose)
+    if H1 === H2
+        P2 = P1
+    else
+        verbose && println("cheb2d: computing P2...")
+        P2 = _get_density_matrix(H2, ϵF, P_method, Ncheb, maxdim, cutoff,
+                                  purify_method, purify_maxdim, purify_maxiters,
+                                  purify_tol, verbose)
+    end
 
     verbose && println("cheb2d: precomputing T_m(H1)·P1 and T_n(H2)·P2...")
     TP1 = [ITensorMPS.truncate!(
@@ -1549,18 +1561,22 @@ function get_bubble_mpo_cheb2d_tucker(H1::TBHamiltonian, H2::TBHamiltonian,
     Tn1, _, _ = KPM_Tn(H1.mpo, Ncheb, H1.sites;
                         scale=scale1, center=center1,
                         maxdim=maxdim, cutoff=cutoff, verbose=false)
-    Tn2, _, _ = KPM_Tn(H2.mpo, Ncheb, H2.sites;
-                        scale=scale2, center=center2,
-                        maxdim=maxdim, cutoff=cutoff, verbose=false)
+    if H1 === H2
+        Tn2 = Tn1
+    else
+        Tn2, _, _ = KPM_Tn(H2.mpo, Ncheb, H2.sites;
+                            scale=scale2, center=center2,
+                            maxdim=maxdim, cutoff=cutoff, verbose=false)
+    end
     N = length(Tn1)
 
     verbose && println("cheb2d_mpo_tucker: computing density matrices...")
     P1 = _get_density_matrix(H1, ϵF, P_method, Ncheb, maxdim, cutoff,
                              purify_method, purify_maxdim, purify_maxiters,
                              purify_tol, verbose)
-    P2 = _get_density_matrix(H2, ϵF, P_method, Ncheb, maxdim, cutoff,
-                             purify_method, purify_maxdim, purify_maxiters,
-                             purify_tol, verbose)
+    P2 = H1 === H2 ? P1 : _get_density_matrix(H2, ϵF, P_method, Ncheb, maxdim, cutoff,
+                                               purify_method, purify_maxdim, purify_maxiters,
+                                               purify_tol, verbose)
 
     out_sites = siteinds("Qubit", L)
 
@@ -1626,8 +1642,11 @@ function get_bubble_mpo_cheb2d_tucker(H1::TBHamiltonian, H2::TBHamiltonian,
         had_A = hadamard_mpo(A_tuck[s1], B_tuck[s2], out_sites; maxdim=maxdim, cutoff=cutoff)
         had_B = hadamard_mpo(C_tuck[s1], E_tuck[s2], out_sites; maxdim=maxdim, cutoff=cutoff)
         D_tuck[s1, s2] = ITensorMPS.truncate!(+(had_A, -1 * had_B; maxdim=maxdim); cutoff=cutoff)
-
-        verbose && println("  ($s1,$s2)/($r_m,$r_n) done")
+        if verbose
+            idx = (s1 - 1) * r_n + s2
+            (idx % 10 == 0 || idx == r_m * r_n) &&
+                println("  ($s1,$s2)/($r_m,$r_n) done  [$idx/$(r_m*r_n)]")
+        end
     end
 
     # ── Per-ω accumulation: scalar × MPO additions only ──────────────────────
@@ -1710,20 +1729,28 @@ function get_bubble_diag_cheb2d(H1::TBHamiltonian, H2::TBHamiltonian,
     Tn1, _, _ = KPM_Tn(H1.mpo, Ncheb, H1.sites;
                          scale=scale1, center=center1,
                          maxdim=maxdim, cutoff=cutoff, verbose=false)
-    verbose && println("cheb2d_diag: building T_n(H2) moments...")
-    Tn2, _, _ = KPM_Tn(H2.mpo, Ncheb, H2.sites;
-                         scale=scale2, center=center2,
-                         maxdim=maxdim, cutoff=cutoff, verbose=false)
+    if H1 === H2
+        Tn2 = Tn1
+    else
+        verbose && println("cheb2d_diag: building T_n(H2) moments...")
+        Tn2, _, _ = KPM_Tn(H2.mpo, Ncheb, H2.sites;
+                             scale=scale2, center=center2,
+                             maxdim=maxdim, cutoff=cutoff, verbose=false)
+    end
     N = length(Tn1)
 
     verbose && println("cheb2d_diag: computing P1...")
     P1 = _get_density_matrix(H1, ϵF, P_method, Ncheb, maxdim, cutoff,
                               purify_method, purify_maxdim, purify_maxiters,
                               purify_tol, verbose)
-    verbose && println("cheb2d_diag: computing P2...")
-    P2 = _get_density_matrix(H2, ϵF, P_method, Ncheb, maxdim, cutoff,
-                              purify_method, purify_maxdim, purify_maxiters,
-                              purify_tol, verbose)
+    if H1 === H2
+        P2 = P1
+    else
+        verbose && println("cheb2d_diag: computing P2...")
+        P2 = _get_density_matrix(H2, ϵF, P_method, Ncheb, maxdim, cutoff,
+                                  purify_method, purify_maxdim, purify_maxiters,
+                                  purify_tol, verbose)
+    end
 
     verbose && println("cheb2d_diag: precomputing T_m(H1)·P1 and T_n(H2)·P2...")
     TP1 = [ITensorMPS.truncate!(
@@ -1880,18 +1907,22 @@ function get_bubble_diag_cheb2d_svd(H1::TBHamiltonian, H2::TBHamiltonian,
     Tn1, _, _ = KPM_Tn(H1.mpo, Ncheb, H1.sites;
                         scale=scale1, center=center1,
                         maxdim=maxdim, cutoff=cutoff, verbose=false)
-    Tn2, _, _ = KPM_Tn(H2.mpo, Ncheb, H2.sites;
-                        scale=scale2, center=center2,
-                        maxdim=maxdim, cutoff=cutoff, verbose=false)
+    if H1 === H2
+        Tn2 = Tn1
+    else
+        Tn2, _, _ = KPM_Tn(H2.mpo, Ncheb, H2.sites;
+                            scale=scale2, center=center2,
+                            maxdim=maxdim, cutoff=cutoff, verbose=false)
+    end
     N = length(Tn1)
 
     verbose && println("cheb2d_diag_svd: computing density matrices...")
     P1 = _get_density_matrix(H1, ϵF, P_method, Ncheb, maxdim, cutoff,
                              purify_method, purify_maxdim, purify_maxiters,
                              purify_tol, verbose)
-    P2 = _get_density_matrix(H2, ϵF, P_method, Ncheb, maxdim, cutoff,
-                             purify_method, purify_maxdim, purify_maxiters,
-                             purify_tol, verbose)
+    P2 = H1 === H2 ? P1 : _get_density_matrix(H2, ϵF, P_method, Ncheb, maxdim, cutoff,
+                                               purify_method, purify_maxdim, purify_maxiters,
+                                               purify_tol, verbose)
 
     out_sites = siteinds("Qubit", L)
 
@@ -2031,18 +2062,22 @@ function get_bubble_diag_cheb2d_tucker(H1::TBHamiltonian, H2::TBHamiltonian,
     Tn1, _, _ = KPM_Tn(H1.mpo, Ncheb, H1.sites;
                         scale=scale1, center=center1,
                         maxdim=maxdim, cutoff=cutoff, verbose=false)
-    Tn2, _, _ = KPM_Tn(H2.mpo, Ncheb, H2.sites;
-                        scale=scale2, center=center2,
-                        maxdim=maxdim, cutoff=cutoff, verbose=false)
+    if H1 === H2
+        Tn2 = Tn1
+    else
+        Tn2, _, _ = KPM_Tn(H2.mpo, Ncheb, H2.sites;
+                            scale=scale2, center=center2,
+                            maxdim=maxdim, cutoff=cutoff, verbose=false)
+    end
     N = length(Tn1)
 
     verbose && println("cheb2d_tucker: computing density matrices...")
     P1 = _get_density_matrix(H1, ϵF, P_method, Ncheb, maxdim, cutoff,
                              purify_method, purify_maxdim, purify_maxiters,
                              purify_tol, verbose)
-    P2 = _get_density_matrix(H2, ϵF, P_method, Ncheb, maxdim, cutoff,
-                             purify_method, purify_maxdim, purify_maxiters,
-                             purify_tol, verbose)
+    P2 = H1 === H2 ? P1 : _get_density_matrix(H2, ϵF, P_method, Ncheb, maxdim, cutoff,
+                                               purify_method, purify_maxdim, purify_maxiters,
+                                               purify_tol, verbose)
 
     out_sites = siteinds("Qubit", L)
 
@@ -2114,8 +2149,11 @@ function get_bubble_diag_cheb2d_tucker(H1::TBHamiltonian, H2::TBHamiltonian,
         D_phys          = replace_sites(D, H1.sites)
         D_k             = conjugate_by_qft(D_phys; tol=qft_tol, maxdim=qft_maxdim)
         diag_D[s1, s2]  = ITensorMPS.truncate!(extract_diagonal_to_mps(D_k); cutoff=cutoff)
-
-        verbose && println("  ($s1,$s2)/($r_m,$r_n) done")
+        if verbose
+            idx = (s1 - 1) * r_n + s2
+            (idx % 10 == 0 || idx == r_m * r_n) &&
+                println("  ($s1,$s2)/($r_m,$r_n) done  [$idx/$(r_m*r_n)]")
+        end
     end
 
     # ── Accumulate per ω: scalar × MPS additions only ────────────────────────
