@@ -53,5 +53,6 @@ include("physics/NH_tk.jl")
 include("physics/QFT_tk.jl")
 include("physics/Supercond_tk.jl")
 #include("RSI_tk.jl")
+include("GPU_tk.jl")
 
 end
