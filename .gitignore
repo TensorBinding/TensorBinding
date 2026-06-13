@@ -24,3 +24,4 @@ examples/sec8_ocd_susceptibility.png
 examples/sec8_bp_ocd_time.png
 docs/src/TensorBinding_APSOS.tex
 docs/src/TensorBinding_APSOS.txt
+.claude/settings.local.json
