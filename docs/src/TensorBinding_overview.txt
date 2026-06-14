@@ -614,38 +614,6 @@ Sublattice-aware geometries (\kw{"honeycomb"}, \kw{"honeycomb\_nnn"}, \kw{"kagom
 helper behind the \kw{mparams} string: it splits \kw{"key1=val1, key2=val2"} on commas/whitespace and
 auto-types each value as \kw{Bool}, \kw{Int}, \kw{Float64}, or \kw{String}.
 
-\subsection{Spatial LDOS Plotting Helpers}
-
-Scatter-plot helpers for the multi-atom sublattice geometries above, built on
-\fn{kagome\_positions}/\fn{lieb\_positions}/\fn{honeycomb\_sublattice\_positions}/\fn{dice\_positions}
-(see Geometry Helpers) and \fn{get\_ldos\_spatial}.
-
-\begin{longtable}{L{6cm} L{8.5cm}}
-\toprule
-\textbf{Signature} & \textbf{Description} \\
-\midrule
-\sig{plot\_ldos\_2d(ldos\_mat, omegalist, omega\_target; geometry=:honeycomb,
-  Lx, Ly, markersize=12.0, colormap=:inferno, colorbar=true, clims=nothing,
-  title="", kwargs...)} $\to$ \sig{Plot}
-  & Scatter plot of the spatial LDOS at the energy in \kw{omegalist} nearest
-    \kw{omega\_target}. \kw{ldos\_mat} is the \kw{(Nomega\(\times\)n\_atoms)} matrix from
-    \fn{get\_ldos\_spatial} called with \kw{num\_x=H.N}; column $k$ maps to atom $k$ of
-    \kw{geometry}'s position matrix. \kw{geometry} $\in\{$\kw{:honeycomb}, \kw{:kagome},
-    \kw{:lieb}, \kw{:dice}$\}$. Errors if \kw{size(ldos\_mat,2)} $\neq$ the atom count
-    for \kw{(Lx,Ly)}. \\[4pt]
-\sig{plot\_ldos\_multilayer(ldos\_layers, omegalist, omega\_target;
-  stacking=:Bernal, geometry=:honeycomb, Lx, Ly, markersize=10.0,
-  colormap=:inferno, colorbar=true, clims=nothing, title="", kwargs...)} $\to$ \sig{Plot}
-  & Top-view scatter plot of multilayer LDOS. \kw{ldos\_layers} is a \kw{Vector} of
-    per-layer \kw{(Nomega\(\times\)n\_atoms)} matrices (one per layer, \kw{proj\_layer=k}).
-    \kw{stacking=:AA}: all layers share positions, LDOS summed directly.
-    \kw{stacking=:Bernal} (default): odd layers sit at the standard geometry
-    positions, even layers are displaced by the intra-cell A$\to$B bond vector;
-    both groups are plotted together ($2\times$\kw{n\_atoms} points), each summed
-    over its own (odd/even) layers. \\
-\bottomrule
-\end{longtable}
-
 % ============================================================
 \section{Generic $n$th-Neighbor Hopping (\texttt{nnneighbor\_tk.jl})}
 % ============================================================
@@ -1134,7 +1102,28 @@ automatically and can be read directly.
   & Single-position convenience wrappers around
     \fn{get\_exciton\_ldos\_spatial} with \kw{X\_list=[X]}: the scalar overload
     returns \kw{ldos[1,1]} for one energy, the vector overload returns
-    \kw{vec(ldos[:,1])} for a list of energies. \\
+    \kw{vec(ldos[:,1])} for a list of energies. \\[4pt]
+\sig{get\_exciton\_ldos\_separation(H::TBHamiltonian, Ncheb, omega\_phys\_vals;
+  d\_list, R\_list=1:H.N, boundary=:open, kernel=:jackson, lambda=4.0, eta=0.0,
+  m\_order=4, maxdim=100, cutoff=1e-8, verbose=false, printinfo=false)}
+  $\to$ \sig{Array\{Float64,3\}}
+  & Relative-separation-resolved exciton LDOS
+    $\rho(d,R,E)=\langle R{+}d,R|\delta(E-H)|R{+}d,R\rangle$, generalising
+    \fn{get\_exciton\_ldos\_spatial} (the $d=0$ slice) to electron-hole probes
+    with electron at $R+d$ and hole at $R$ (both 1-indexed in $1{:}H.N$). Each
+    $(d,R)$ pair is a single product-state probe
+    \fn{mpsexciton}\kw{(R+d, R, H.sites)} --- no carry/superposition
+    construction is needed, unlike the momentum-space probes.
+    \kw{boundary=:open} (default) leaves out-of-range $R+d$ as \kw{NaN};
+    \kw{:periodic} wraps modulo \kw{H.N}. Returns
+    \kw{(Nomega, length(d\_list), length(R\_list))}; cost is
+    \kw{length(d\_list)*length(R\_list)} Chebyshev recursions. \\[4pt]
+\sig{exciton\_radius2(rho::AbstractArray\{<:Real,3\}, d\_list)} $\to$ \sig{Matrix\{Float64\}}
+  & Energy-resolved exciton radius $\xi^2(R,E)=\sum_d d^2 P(d|R,E)$ with
+    $P(d|R,E)=\rho(d,R,E)/\sum_{d'}\rho(d',R,E)$, from a \kw{rho} array returned
+    by \fn{get\_exciton\_ldos\_separation}. Returns \kw{(Nomega, n\_R)}; entries
+    are \kw{NaN} where any $d$-slice of \kw{rho} contains \kw{NaN} or the
+    normalisation $\sum_d\rho(d,R,E)$ vanishes. \\
 \bottomrule
 \end{longtable}
 
@@ -1304,26 +1293,10 @@ on even sites.
 \textbf{Momentum-basis probe states.}  Compact finite-state MPS on the
 interleaved $2L$-qubit chain, each built in $O(L)$ via a carry bond that enforces
 $k+h \equiv Q \;(\mathrm{mod}\;N)$, never by explicit summation over the
-$N=2^{L}$ momenta.
-
-\begin{longtable}{L{6.5cm} L{8.5cm}}
-\toprule
-\textbf{Signature} & \textbf{Description} \\
-\midrule
-\sig{mpsexcitonQ(Q, sites)} $\to$ \sig{MPS}
-  & Coherent fixed-total-momentum pair state
-    $|Q\rangle = N^{-1/2}\sum_k |k,\,{-k}+Q\rangle$. The reference probe for
-    exciton \emph{bands}. \\[4pt]
-\sig{mpsexcitonQTrace(Q, sites; rng)} $\to$ \sig{MPS}
-  & Random-phase ($\pm1$) trace probe
-    $|r_Q\rangle = N^{-1/2}\sum_k \eta_k |k,Q{-}k\rangle$ with
-    $E[\eta_k\eta_l]=\delta_{kl}$, so averaging probes estimates the fixed-$Q$
-    continuum trace.  The stochastic \emph{continuum} probe. \\[4pt]
-\sig{mpsexcitonKQ(k, Q, sites)} $\to$ \sig{MPS}
-  & Single product basis vector $|k,Q{-}k\rangle$ in the fixed-$Q$ sector; the
-    deterministic continuum probe sampled by \fn{get\_exciton\_continuum}. \\
-\bottomrule
-\end{longtable}
+$N=2^{L}$ momenta. \fn{mpsexcitonQ}, \fn{mpsexcitonQTrace}, and
+\fn{mpsexcitonKQ} now live in \textbf{Two-Particle Systems
+(twoparticle\_tk.jl) $\to$ MPS Basis-State Probes}, alongside the real-space
+\fn{mpsexciton} probes.
 
 \textbf{Spectral drivers.}  MPS-KPM analogues of \fn{get\_bands}: one online
 Chebyshev recursion per momentum (or averaged group), accumulating all energies
@@ -1895,6 +1868,43 @@ H_exc = exciton_hamiltonian(H_c, H_v, x -> -0.2)
 Tn, scale, center = KPM_Tn(H_exc, 200)
 dos = real(tr(get_ldos_w_from_Tn(Tn, 200, 0.0; maxdim=200)))
 \end{verbatim}
+
+\subsection{MPS Basis-State Probes}
+
+Real-space and momentum-space MPS probes on the interleaved $2L$-site
+electron-hole chain. The real-space probes are plain product states, 1-indexed
+($1{:}2^L$), MSB-first (matching \fn{get\_diagonal\_mpo}). The momentum-space
+probes are compact finite-state MPS built in $O(L)$ via a carry bond enforcing
+$k+h \equiv Q \;(\mathrm{mod}\;N)$, never by explicit summation over the
+$N=2^{L}$ momenta; momentum indices are 1-indexed ($1{:}2^L$), LSB-first, with
+electron bits on odd sites and hole bits on even sites.
+
+\begin{longtable}{L{6.5cm} L{8.5cm}}
+\toprule
+\textbf{Signature} & \textbf{Description} \\
+\midrule
+\sig{mpsexciton(xe, xh, sites)} $\to$ \sig{MPS}
+  & Real-space product state $|x_e,x_h\rangle$: \kw{xe}/\kw{xh} are 1-indexed
+    electron/hole positions in $1{:}2^L$, odd sites = electron qubit, even
+    sites = hole qubit. Used by \fn{get\_exciton\_ldos\_separation}. \\[4pt]
+\sig{mpsexciton(x, sites)} $\to$ \sig{MPS}
+  & \kw{= mpsexciton(x, x, sites)}: the bound $|x,x\rangle$ probe ($d=0$
+    electron-hole separation), used by \fn{get\_exciton\_ldos\_spatial}. \\[4pt]
+\sig{mpsexcitonQ(Q, sites)} $\to$ \sig{MPS}
+  & Coherent fixed-total-momentum pair state
+    $|Q\rangle = N^{-1/2}\sum_k |k,\,{-k}+Q\rangle$. The reference probe for
+    exciton \emph{bands} (\fn{get\_exciton\_bands}). \\[4pt]
+\sig{mpsexcitonQTrace(Q, sites; rng)} $\to$ \sig{MPS}
+  & Random-phase ($\pm1$) trace probe
+    $|r_Q\rangle = N^{-1/2}\sum_k \eta_k |k,Q{-}k\rangle$ with
+    $E[\eta_k\eta_l]=\delta_{kl}$, so averaging probes estimates the fixed-$Q$
+    continuum trace. The stochastic \emph{continuum} probe
+    (\fn{get\_exciton\_continuum}). \\[4pt]
+\sig{mpsexcitonKQ(k, Q, sites)} $\to$ \sig{MPS}
+  & Single product basis vector $|k,Q{-}k\rangle$ in the fixed-$Q$ sector; the
+    deterministic continuum probe sampled by \fn{get\_exciton\_continuum}. \\
+\bottomrule
+\end{longtable}
 
 % ============================================================
 \section{Random Phase Approximation (\texttt{RPA\_tk.jl})}
@@ -2473,9 +2483,6 @@ function.
 \sig{build\_shift\_mpo(sites, q)} $\to$ \sig{MPO}
   & Cyclic shift MPO: maps $|x\rangle \to |x{+}q\rangle$ (mod $2^L$) on a binary-encoded chain.
     Built site-by-site using binary addition with carry; \kw{q} is an integer offset. \\[4pt]
-\sig{mpsexciton(x, sites)} $\to$ \sig{MPS}
-  & Exciton basis state $|x,x\rangle$ on the interleaved $2L$-site electron-hole chain.
-    \kw{x} is 1-indexed; odd sites = electron qubit, even sites = hole qubit. \\[4pt]
 \sig{mps\_to\_diagonal\_mpo(mps, sites)} $\to$ \sig{MPO}
   & Convert an MPS to a diagonal MPO on \kw{sites} by replacing each physical index
     with a bra-ket pair tied by a delta tensor.
@@ -2945,10 +2952,6 @@ legacy LSB-first convention required by the quantics-Fourier MPO.  The two are
 \textbf{not} interchangeable --- see \fn{spatial\_sampling\_plan} in
 \texttt{Utils.jl} for how the shared sampler keeps them straight.
 
-Production driver scripts that exercise this toolkit (magnetic-Hubbard SCF,
-magnetization/bands maps, spatial LDOS with the \kw{:point}/\kw{:block}
-samplers) live under \texttt{examples/nontracked/APSOS/}.
-
 \subsection{Spectral and Spatial Maps (DOS/LDOS/Bands)}
 
 \begin{longtable}{L{7.5cm} L{7.5cm}}
@@ -3106,45 +3109,6 @@ samplers) live under \texttt{examples/nontracked/APSOS/}.
     \fn{get\_bands\_gpu} call uploads once and keeps the Chebyshev/QFT
     accumulation on GPU, extracting only scalars.  \kw{Ak = Ak\_up + Ak\_dn};
     \kw{kwargs} are forwarded verbatim to both \fn{get\_bands\_gpu} calls. \\
-\bottomrule
-\end{longtable}
-
-\subsection{Experimental: Conductivity (Not Working Yet)}
-
-The module header for \texttt{GPU\_tk.jl} explicitly lists the following two
-entry points under ``Conductivity (experimental/not working yet)''. They are
-documented here for completeness only --- their signatures and intended
-GPU/CPU split match \fn{get\_conductivity\_ward}/\fn{get\_conductivity\_cheb2d}
-from \texttt{Conductivity\_tk.jl}, but they should not be relied upon for
-production results until this note is updated.
-
-\begin{longtable}{L{7.5cm} L{7.5cm}}
-\toprule
-\textbf{Signature} & \textbf{Description} \\
-\midrule
-\sig{get\_conductivity\_ward\_gpu(H1::TBHamiltonian, H2::TBHamiltonian, \(\omega\)list;
-  q\_int=1, Lx=H1.L\(\div\)2, q\_sq=nothing, Ncheb=50, maxdim=200, cutoff=1e-8,
-  \(\epsilon_F\)=0.0, P\_method=:purification, purify\_method=:mcweeny,
-  purify\_maxdim=40, purify\_maxiters=30, purify\_tol=1e-5, \(\eta\)=1e-3,
-  coeff\_tol=1e-12, kernel=:jackson, tucker\_tol=1e-3, tucker\_maxrank=20,
-  hooi\_iters=3, qft\_tol=1e-9, qft\_maxdim=100, verbose=false)}
-  $\to$ \sig{Vector\{ComplexF64\}}
-  & \textbf{Experimental / not working yet.}  GPU-accelerated Ward-identity
-    $\sigma(\omega)$.  GPU handles the Chebyshev recurrence, density-matrix
-    transfer, weighted MPO sums, MPO$\times$MPO multiplications, and Hadamard
-    products; CPU handles \kw{replace\_sites}, the QFT sandwich, inner
-    products, and per-$\omega$ accumulation.  Kwargs otherwise mirror
-    \fn{get\_conductivity\_ward} (threading is removed --- use
-    \kw{julia -t N} at the process level instead). \\[4pt]
-\sig{get\_conductivity\_cheb2d\_gpu(H1::TBHamiltonian, H2::TBHamiltonian, \(\omega\)list;
-  mu\_a=:x, mu\_b=:x, Ncheb=50, maxdim=200, cutoff=1e-8, \(\epsilon_F\)=0.0,
-  P\_method=:purification, purify\_method=:mcweeny, purify\_maxdim=40,
-  purify\_maxiters=30, purify\_tol=1e-5, \(\eta\)=1e-3, kernel=:jackson,
-  tucker\_tol=1e-3, tucker\_maxrank=20, hooi\_iters=3, tol\_dr=1e-8,
-  verbose=false)} $\to$ \sig{Vector\{Float64\}}
-  & \textbf{Experimental / not working yet.}  GPU-accelerated 2D-Chebyshev
-    $\sigma(\omega)$, with the same GPU/CPU split as
-    \fn{get\_conductivity\_ward\_gpu}. \\
 \bottomrule
 \end{longtable}
 
