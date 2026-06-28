@@ -671,23 +671,37 @@ function _state_amplitude_component(z::Complex, component::Symbol)
 end
 
 function _sample_state_amplitudes_gpu(ψ_gpu::MPS, plan;
-                                      component::Symbol)
+                                      component::Symbol,
+                                      pointavg::Symbol = :complex)
     component in (:real, :imag, :abs, :abs2, :probability) ||
         error("_sample_state_amplitudes_gpu: unsupported component :$component.")
+    pointavg in (:complex, :abs, :abs2) ||
+        error("_sample_state_amplitudes_gpu: pointavg must be :complex, :abs, or :abs2.")
 
-    amps = if plan.reduce === :block
+    if plan.reduce === :block
         Lbits = length(ψ_gpu)
         nb    = 2^plan.a
         norm  = Float64(plan.stride_x)
-        ComplexF64[_eval_block_mps_1d_complex_gpu(ψ_gpu, ixp, plan.a, Lbits) / norm
-                   for ixp in 0:(nb - 1)]
+        amps  = ComplexF64[_eval_block_mps_1d_complex_gpu(ψ_gpu, ixp, plan.a, Lbits) / norm
+                           for ixp in 0:(nb - 1)]
+        return Float64[_state_amplitude_component(z, component) for z in amps]
     else
-        ComplexF64[
-            sum(_eval_mps_bigendian_complex_gpu(ψ_gpu, x - 1) for x in grp) / length(grp)
-            for grp in plan.groups
-        ]
+        if pointavg === :complex
+            # Default: coherent average of complex amplitudes, then apply component.
+            amps = ComplexF64[
+                sum(_eval_mps_bigendian_complex_gpu(ψ_gpu, x - 1) for x in grp) / length(grp)
+                for grp in plan.groups
+            ]
+            return Float64[_state_amplitude_component(z, component) for z in amps]
+        else
+            # Incoherent average: apply abs or abs2 per site before averaging.
+            _paf = pointavg === :abs2 ? abs2 : abs
+            return Float64[
+                sum(_paf(_eval_mps_bigendian_complex_gpu(ψ_gpu, x - 1)) for x in grp) / length(grp)
+                for grp in plan.groups
+            ]
+        end
     end
-    return Float64[_state_amplitude_component(z, component) for z in amps]
 end
 
 function _state_norm_gpu(ψ_gpu::MPS)
@@ -728,6 +742,7 @@ function get_state_amplitude_trajectory_gpu(H, psi0::MPS;
                                             x_end::Union{Nothing,Int} = nothing,
                                             x_groups = nothing,
                                             component::Symbol = :real,
+                                            pointavg::Symbol = :complex,
                                             normalize_each_step::Bool = false,
                                             maxdim::Int = 200,
                                             cutoff::Real = 1e-8,
@@ -772,7 +787,7 @@ function get_state_amplitude_trajectory_gpu(H, psi0::MPS;
 
     sample_idx = 1
     amplitude[:, sample_idx] = _sample_state_amplitudes_gpu(ψ_gpu, plan;
-        component=component)
+        component=component, pointavg=pointavg)
     norms[sample_idx] = _state_norm_gpu(ψ_gpu)
     maxlinks[sample_idx] = maxlinkdim(ψ_gpu)
     printinfo && println("  [gpu] state sample step 0/$nsteps  t=0.0  norm=$(round(norms[sample_idx], sigdigits=6))  maxlinkdim=$(maxlinks[sample_idx])")
@@ -1822,6 +1837,7 @@ function _nh_diag_trace_scalar_online_gpu(NH::NonHermitianHamiltonian, n::Int;
                                           block_row::Int  = 2,
                                           block_col::Int  = 1,
                                           dtype::Type{<:Complex} = ComplexF64,
+                                          printinfo::Bool = false,
                                           verbose::Bool = false)
     _check_gpu("_nh_diag_trace_scalar_online_gpu")
 
@@ -1876,7 +1892,8 @@ function _nh_diag_trace_scalar_online_gpu(NH::NonHermitianHamiltonian, n::Int;
         Pkm2 = Pkm1
         Pkm1 = Pk
 
-        verbose && println("    [gpu] NH scalar-diag order $k/$N  maxlinkdim(P)=$(maxlinkdim(Pkm1)) dtype(T)=$(eltype(Tkm1[1])) dtype(P)=$(eltype(Pkm1[1]))")
+        (verbose || (printinfo && k % 15 == 0)) &&
+            println("    [gpu] NH scalar-diag cheb $k/$N  maxlinkdim(T)=$(maxlinkdim(Tkm1))  maxlinkdim(P)=$(maxlinkdim(Pkm1))")
     end
 
     _gpu_gc!()
@@ -2292,7 +2309,7 @@ function get_nh_dos_points_diag_trace_gpu(H::TBHamiltonian, z_points, n::Int;
     for j in 1:Nz
         z = ComplexF64(z_list[j])
         point_id = Int(ids[j])
-        (verbose || printinfo) &&
+        (verbose || (printinfo && (j == 1 || j % 15 == 0 || j == Nz))) &&
             println("  [gpu] NH diag-trace point $j/$Nz  id=$point_id  z=$(round(real(z), digits=4)) + $(round(imag(z), digits=4))im")
 
         NH = hermitize(H; z=z, scale=nh_scale, maxdim=maxdim,
@@ -2307,6 +2324,7 @@ function get_nh_dos_points_diag_trace_gpu(H::TBHamiltonian, z_points, n::Int;
             block_row=block_row,
             block_col=block_col,
             dtype=dtype,
+            printinfo=printinfo,
             verbose=verbose)
     end
 
