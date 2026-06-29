@@ -122,14 +122,27 @@ function _to_gpu_mpo(mpo::MPO)
     return _tb_cuda_module().cu(_mpo_to_f32(mpo))
 end
 
-# CPU MPO → GPU with explicit complex dtype. Used by NH deterministic online
-# experiments, where ComplexF64 can avoid ComplexF32 CUDA eigensolver NaNs.
+# CPU MPO → GPU with explicit dtype (complex or real).
+# Complex: T.(arr) casts ComplexF64 → T directly.
+# Real:    real.(arr) discards zero imaginary parts, then casts to T.
+#          Only valid when the MPO is known to be real-valued.
 function _to_gpu_mpo(mpo::MPO, T::Type{<:Complex})
     _check_gpu("_to_gpu_mpo")
     cuda = _tb_cuda_module()
     return MPO([
         let idx = inds(mpo[i])
             ITensors.itensor(cuda.CuArray(T.(Array(mpo[i], idx...))), idx...)
+        end
+        for i in 1:length(mpo)
+    ])
+end
+
+function _to_gpu_mpo(mpo::MPO, T::Type{<:Real})
+    _check_gpu("_to_gpu_mpo")
+    cuda = _tb_cuda_module()
+    return MPO([
+        let idx = inds(mpo[i])
+            ITensors.itensor(cuda.CuArray(T.(real.(Array(mpo[i], idx...)))), idx...)
         end
         for i in 1:length(mpo)
     ])
@@ -158,6 +171,31 @@ function _to_gpu_mps(mps::MPS, T::Type{<:Complex})
         result[j] = ITensors.itensor(cuda.CuArray(T.(arr)), idx...)
     end
     return result
+end
+
+function _to_gpu_mps(mps::MPS, T::Type{<:Real})
+    _check_gpu("_to_gpu_mps")
+    cuda = _tb_cuda_module()
+    result = similar(mps)
+    for j in 1:length(mps)
+        idx = inds(mps[j])
+        arr = Array(mps[j], idx...)
+        result[j] = ITensors.itensor(cuda.CuArray(T.(real.(arr))), idx...)
+    end
+    return result
+end
+
+# Resolve the type/dtype kwarg pair into a single GPU element type and emit a
+# tight-cutoff NaN warning for 32-bit types. Shared by the Hermitian/KPM GPU
+# entry points that accept real OR complex element types (ComplexF32 default;
+# ComplexF64 / Float32 / Float64 also valid — real types only for real H).
+function _resolve_gpu_type(caller::String, type, dtype, cutoff)
+    gpu_type = dtype === nothing ? type : dtype
+    dtype !== nothing && dtype != type && type != ComplexF32 &&
+        error("$caller: received both type=$type and dtype=$dtype; pass only one datatype keyword.")
+    (gpu_type == ComplexF32 || gpu_type == Float32) && cutoff < 1e-6 &&
+        @warn "$caller: cutoff=$cutoff with 32-bit $gpu_type may produce NaN on large systems; use a 64-bit dtype or cutoff ≥ 1e-4."
+    return gpu_type
 end
 
 function _to_cpu_mps(mps::MPS)
@@ -470,11 +508,27 @@ function _ensure_gpu_mpo(W::MPO; caller::String = "_ensure_gpu_mpo")
     return _to_gpu_mpo(W)
 end
 
+# Upload a CPU MPO with an explicit element type; already-GPU MPOs are returned
+# untouched (the caller chose their type at upload time).
+function _ensure_gpu_mpo(W::MPO, T::Type{<:Number}; caller::String = "_ensure_gpu_mpo")
+    flags = [_is_gpu_tensor(W[i]) for i in 1:length(W)]
+    all(flags) && return W
+    any(flags) && error("$caller: mixed CPU/GPU MPO tensors are not supported.")
+    return _to_gpu_mpo(W, T)
+end
+
 function _ensure_gpu_mps(ψ::MPS; caller::String = "_ensure_gpu_mps")
     flags = [_is_gpu_tensor(ψ[i]) for i in 1:length(ψ)]
     all(flags) && return ψ
     any(flags) && error("$caller: mixed CPU/GPU MPS tensors are not supported.")
     return _to_gpu_mps(ψ)
+end
+
+function _ensure_gpu_mps(ψ::MPS, T::Type{<:Number}; caller::String = "_ensure_gpu_mps")
+    flags = [_is_gpu_tensor(ψ[i]) for i in 1:length(ψ)]
+    all(flags) && return ψ
+    any(flags) && error("$caller: mixed CPU/GPU MPS tensors are not supported.")
+    return _to_gpu_mps(ψ, T)
 end
 
 """
@@ -606,10 +660,11 @@ function get_nh_density_trajectory_gpu(H, rho0::MPO;
                                        maxdim::Int = 200,
                                        cutoff::Real = 1e-8,
                                        truncate_intermediates::Bool = true,
+                                       dtype::Type{<:Complex} = ComplexF32,
                                        printinfo::Bool = false,
                                        verbose::Bool = false)
     _check_gpu("get_nh_density_trajectory_gpu")
-    cutoff < 1e-6 && @warn "get_nh_density_trajectory_gpu: cutoff=$cutoff is below 1e-6; ComplexF32 GPU contractions may be unstable on large systems."
+    gpu_type = _resolve_gpu_type("get_nh_density_trajectory_gpu", dtype, nothing, cutoff)
     nsteps >= 0 || error("get_nh_density_trajectory_gpu: nsteps must be non-negative.")
     sample_every > 0 || error("get_nh_density_trajectory_gpu: sample_every must be positive.")
     reduce in (:point, :block) || error("get_nh_density_trajectory_gpu: reduce must be :point or :block.")
@@ -632,9 +687,9 @@ function get_nh_density_trajectory_gpu(H, rho0::MPO;
     density = Matrix{Float64}(undef, length(centers), length(sample_steps))
     maxlinks = Vector{Int}(undef, length(sample_steps))
 
-    H_gpu = _ensure_gpu_mpo(H_mpo; caller="get_nh_density_trajectory_gpu")
+    H_gpu = _ensure_gpu_mpo(H_mpo, gpu_type; caller="get_nh_density_trajectory_gpu")
     Hdag_gpu = conj(swapprime(H_gpu, 0, 1))
-    rho_gpu = _ensure_gpu_mpo(rho0; caller="get_nh_density_trajectory_gpu")
+    rho_gpu = _ensure_gpu_mpo(rho0, gpu_type; caller="get_nh_density_trajectory_gpu")
 
     sample_idx = 1
     density[:, sample_idx] = _sample_density_diag_gpu(rho_gpu, plan;
@@ -749,10 +804,11 @@ function get_state_amplitude_trajectory_gpu(H, psi0::MPS;
                                             reverse_step::Bool = false,
                                             outputlevel::Int = 0,
                                             nsite::Int = 2,
+                                            dtype::Type{<:Complex} = ComplexF32,
                                             printinfo::Bool = false,
                                             verbose::Bool = false)
     _check_gpu("get_state_amplitude_trajectory_gpu")
-    cutoff < 1e-6 && @warn "get_state_amplitude_trajectory_gpu: cutoff=$cutoff is below 1e-6; ComplexF32 TDVP contractions may be unstable on large systems."
+    gpu_type = _resolve_gpu_type("get_state_amplitude_trajectory_gpu", dtype, nothing, cutoff)
     nsteps >= 0 || error("get_state_amplitude_trajectory_gpu: nsteps must be non-negative.")
     sample_every > 0 || error("get_state_amplitude_trajectory_gpu: sample_every must be positive.")
     reduce in (:point, :block) || error("get_state_amplitude_trajectory_gpu: reduce must be :point or :block.")
@@ -777,13 +833,13 @@ function get_state_amplitude_trajectory_gpu(H, psi0::MPS;
     norms = Vector{Float64}(undef, length(sample_steps))
     maxlinks = Vector{Int}(undef, length(sample_steps))
 
-    H_gpu = _ensure_gpu_mpo(H_mpo; caller="get_state_amplitude_trajectory_gpu")
+    H_gpu = _ensure_gpu_mpo(H_mpo, gpu_type; caller="get_state_amplitude_trajectory_gpu")
     # ITensorMPS.tdvp(operator, t, init) computes exp(t*operator)*init (generator
     # form, no implicit sign flip), so -im*H gives dψ/dt = -im*Hψ, matching
     # evolve_with_tdvp(H::TBHamiltonian,...) (-im*H.mpo) and the NH RK4 convention
     # dρ/dt = -i(Hρ - ρH†). For H = H0 - iΓ this makes Γ>=0 lossy.
-    generator_gpu = ComplexF32(0, -1) * H_gpu
-    ψ_gpu = _ensure_gpu_mps(psi0; caller="get_state_amplitude_trajectory_gpu")
+    generator_gpu = gpu_type(0, -1) * H_gpu
+    ψ_gpu = _ensure_gpu_mps(psi0, gpu_type; caller="get_state_amplitude_trajectory_gpu")
 
     sample_idx = 1
     amplitude[:, sample_idx] = _sample_state_amplitudes_gpu(ψ_gpu, plan;
@@ -960,9 +1016,12 @@ function KPM_Tn_gpu(H_mpo::MPO, N::Int, sites;
                     dmrg_linkdim::Int                   = 4,
                     cutoff::Real                        = 1e-8,
                     keep_indices::Union{Nothing,AbstractSet{Int}} = nothing,
+                    type::Type{<:Number}                = ComplexF32,
+                    dtype::Union{Nothing,Type{<:Number}} = nothing,
                     verbose::Bool                       = true)
 
     _check_gpu("KPM_Tn_gpu")
+    gpu_type = _resolve_gpu_type("KPM_Tn_gpu", type, dtype, cutoff)
 
     if isnothing(scale)
         scale, center = _estimate_spectral_bounds(H_mpo, sites;
@@ -974,8 +1033,8 @@ function KPM_Tn_gpu(H_mpo::MPO, N::Int, sites;
     I_mpo = MPO(sites, "Id")
     Ham_n = (1 / scale) * +(H_mpo, (-center) * I_mpo; cutoff = cutoff)
 
-    I_mpo = _to_gpu_mpo(I_mpo)
-    Ham_n = _to_gpu_mpo(Ham_n)
+    I_mpo = _to_gpu_mpo(I_mpo, gpu_type)
+    Ham_n = _to_gpu_mpo(Ham_n, gpu_type)
 
     keep = keep_indices
     T_k_minus_2 = I_mpo
@@ -1080,8 +1139,8 @@ function get_bands_gpu(H::TBHamiltonian, Ncheb::Int, ω_phys_vals;
                        maxdim::Int       = 100,
                        cutoff::Real      = 1e-10,
                        printinfo::Bool   = false,
-                       type::Type{<:Complex} = ComplexF32,
-                       dtype::Union{Nothing,Type{<:Complex}} = nothing)
+                       type::Type{<:Number} = ComplexF32,
+                       dtype::Union{Nothing,Type{<:Number}} = nothing)
 
     _check_gpu("get_bands_gpu")
     gpu_type = dtype === nothing ? type : dtype
@@ -1385,8 +1444,8 @@ function get_ldos_spatial_gpu(H::TBHamiltonian, Ncheb::Int, ω_phys_vals;
                                proj_layer        = nothing,
                                sublat_proj::Bool = false,
                                proj_sl           = nothing,
-                               type::Type{<:Complex} = ComplexF32,
-                               dtype::Union{Nothing,Type{<:Complex}} = nothing)
+                               type::Type{<:Number} = ComplexF32,
+                               dtype::Union{Nothing,Type{<:Number}} = nothing)
 
     _check_gpu("get_ldos_spatial_gpu")
     gpu_type = dtype === nothing ? type : dtype
@@ -1612,10 +1671,12 @@ function get_dos_stochastic_gpu(H::TBHamiltonian, Ncheb::Int, ω_phys_vals;
                                   layer_proj::Bool         = false,
                                   proj_layer               = nothing,
                                   sublat_proj::Bool        = false,
-                                  proj_sl                  = nothing)
+                                  proj_sl                  = nothing,
+                                  type::Type{<:Number}     = ComplexF32,
+                                  dtype::Union{Nothing,Type{<:Number}} = nothing)
 
     _check_gpu("get_dos_stochastic_gpu")
-    cutoff < 1e-6 && @warn "get_dos_stochastic_gpu: cutoff=$cutoff is below 1e-6; ComplexF32 eigendecomposition may produce NaN on large systems — consider cutoff ≥ 1e-4."
+    gpu_type = _resolve_gpu_type("get_dos_stochastic_gpu", type, dtype, cutoff)
     _ensure_scale!(H)
     dos_weighting in (:trace, :sample) ||
         error("get_dos_stochastic_gpu: dos_weighting must be :trace or :sample.")
@@ -1624,7 +1685,7 @@ function get_dos_stochastic_gpu(H::TBHamiltonian, Ncheb::Int, ω_phys_vals;
 
     I_mpo_cpu = MPO(H.sites, "Id")
     Ham_n_cpu = (1 / H.scale) * +(H.mpo, (-H.center) * I_mpo_cpu; cutoff=cutoff)
-    Ham_n_gpu = _to_gpu_mpo(Ham_n_cpu)
+    Ham_n_gpu = _to_gpu_mpo(Ham_n_cpu, gpu_type)
 
     D      = prod(ITensors.dim(s) for s in H.sites)
     N_phys = H.N
@@ -1692,7 +1753,7 @@ function get_dos_stochastic_gpu(H::TBHamiltonian, Ncheb::Int, ω_phys_vals;
             xs = rand(rng, 1:N_phys, N_sample)
             for (i, x) in enumerate(xs)
                 for σ_n in nambu_range, σ_s in spin_range, σ_l in layer_range, σ_sl in sl_range
-                    psi0_gpu = _to_gpu_mps(_ldos_make_psi0(H, x, σ_n, σ_s, σ_l, σ_sl))
+                    psi0_gpu = _to_gpu_mps(_ldos_make_psi0(H, x, σ_n, σ_s, σ_l, σ_sl), gpu_type)
                     χ = _run_kpm_mps_gpu!(psi0_gpu, accum_full, 1.0/N_sample)
                     (verbose || printinfo) && i % 10 == 0 &&
                         σ_n == first(nambu_range) && σ_s == first(spin_range) &&
@@ -1723,7 +1784,7 @@ function get_dos_stochastic_gpu(H::TBHamiltonian, Ncheb::Int, ω_phys_vals;
             for i in 1:N_sample
                 xe = xs_e[i]
                 xh = ys_h[i] < xe ? ys_h[i] : ys_h[i] + 1
-                psi0_gpu = _to_gpu_mps(_exciton_pair_mps_gpu_seed(xe, xh))
+                psi0_gpu = _to_gpu_mps(_exciton_pair_mps_gpu_seed(xe, xh), gpu_type)
                 χ = _run_kpm_mps_gpu!(psi0_gpu, accum_full, 1.0/N_sample)
                 (verbose || printinfo) && i % 10 == 0 &&
                     println("  [gpu] dos continuum sample $i/$N_sample (xe=$xe, xh=$xh)  maxlinkdim=$χ")
@@ -1731,7 +1792,7 @@ function get_dos_stochastic_gpu(H::TBHamiltonian, Ncheb::Int, ω_phys_vals;
         else
             samples = rand(rng, 0:(D - 1), N_sample)
             for (i, k) in enumerate(samples)
-                psi0_gpu = _to_gpu_mps(_basis_state_mps(k, H.sites))
+                psi0_gpu = _to_gpu_mps(_basis_state_mps(k, H.sites), gpu_type)
                 χ = _run_kpm_mps_gpu!(psi0_gpu, accum_full, 1.0/N_sample)
                 (verbose || printinfo) && i % 10 == 0 &&
                     println("  [gpu] dos sample $i/$N_sample  maxlinkdim=$χ")
@@ -1743,7 +1804,7 @@ function get_dos_stochastic_gpu(H::TBHamiltonian, Ncheb::Int, ω_phys_vals;
     if N_bound > 0 && is_exc
         xs = rand(rng, 1:N_phys, N_bound)
         for (i, x) in enumerate(xs)
-            psi0_gpu = _to_gpu_mps(mpsexciton(x, H.sites))
+            psi0_gpu = _to_gpu_mps(mpsexciton(x, H.sites), gpu_type)
             χ = _run_kpm_mps_gpu!(psi0_gpu, accum_bound, 1.0/N_bound)
             (verbose || printinfo) && i % 10 == 0 &&
                 println("  [gpu] dos bound sample $i/$N_bound (x=$x)  maxlinkdim=$χ")
@@ -2420,19 +2481,30 @@ One GPU Chebyshev recursion runs per probe position X (electron = hole = X, 1-in
 in 1:H.N) from |X,X⟩ = mpsexciton(X, H.sites); moments are scalars pulled to CPU.
 
 **1D sampling** (default, `Lx=nothing`): `num_x` coarse positions over `[x_start, x_end]`
-with `num_avg` sub-positions per coarse cell (`:point` reduce), or full block enumeration
-(`:block` reduce, requires `num_x` a power of two; averages all block members).
+with `num_avg` sub-positions per coarse cell averaged per output pixel.
 
 **2D grid** (`Lx` provided): positions are 1-indexed on the (Lx+Ly)-qubit quantics grid,
 encoded as X = ix + iy·2^Lx + 1 (row-major, 0-indexed). `num_x × num_y` coarse cells
-are built via `spatial_sampling_plan`; `:point` sub-samples with `num_avg`, `:block`
-enumerates every member of each coarse block (requires both `num_x`, `num_y` powers of
-two). Output columns are row-major over coarse cells (iy outer, ix inner).
+are sampled via `spatial_sampling_plan` with `num_avg` sub-positions per cell.
+Output columns are row-major over coarse cells (iy outer, ix inner).
 
 `X_list` / `X_groups` / `x_groups` bypass the automatic plan and pass positions directly.
 
 `kernel=:hodc` selects HODC reconstruction (`eta`, `m_order`; `eta=0` → `1/(Ncheb+1)`).
 Other kernels: `:jackson` (default), `:lorentz` (`lambda`), `:fejer`, `:dirichlet`.
+
+Use `type=ComplexF32` (default, faster) or `type=ComplexF64` (safer at tight cutoffs
+or on large systems where F32 eigendecomposition can produce NaN). `dtype` is accepted
+as an alias for `type` for consistency with other GPU entry points.
+
+!!! note "Block averaging not supported"
+    `reduce=:block` is **not available** for the exciton LDOS. In the MPO-based LDOS
+    functions (`get_ldos_spatial_gpu`), block averaging is a cheap O(1) partial trace
+    of the diagonal MPS over the within-block position bits. The exciton LDOS has no
+    diagonal MPS representation: each probe requires an independent Chebyshev recursion
+    from |X,X⟩, so block averaging would cost O(block_size) recursions per pixel —
+    equivalent to computing every site. Use `reduce=:point` with `num_avg` for light
+    spatial averaging (each output pixel averages `num_avg` nearby positions).
 """
 function get_exciton_ldos_spatial_gpu(H::TBHamiltonian, Ncheb::Int, ω_phys_vals;
                                        Lx::Union{Nothing,Int}    = nothing,
@@ -2451,13 +2523,24 @@ function get_exciton_ldos_spatial_gpu(H::TBHamiltonian, Ncheb::Int, ω_phys_vals
                                        m_order::Int     = 4,
                                        maxdim::Int      = 100,
                                        cutoff::Real     = 1e-8,
+                                       type::Type{<:Number}                  = ComplexF32,
+                                       dtype::Union{Nothing,Type{<:Number}}  = nothing,
                                        verbose::Bool    = false,
                                        printinfo::Bool  = false)
 
     _check_gpu("get_exciton_ldos_spatial_gpu")
-    cutoff < 1e-6 && @warn "get_exciton_ldos_spatial_gpu: cutoff=$cutoff is below 1e-6; ComplexF32 eigendecomposition may produce NaN on large systems — consider cutoff ≥ 1e-4."
-    reduce in (:point, :block) ||
-        error("get_exciton_ldos_spatial_gpu: reduce must be :point or :block, got $reduce.")
+    gpu_type = dtype === nothing ? type : dtype
+    dtype !== nothing && dtype != type && type != ComplexF32 &&
+        error("get_exciton_ldos_spatial_gpu: received both type=$type and dtype=$dtype; pass only one datatype keyword.")
+    gpu_type == ComplexF32 && cutoff < 1e-6 &&
+        @warn "get_exciton_ldos_spatial_gpu: cutoff=$cutoff with ComplexF32 may produce NaN — use type=ComplexF64 or cutoff ≥ 1e-4."
+    reduce === :block &&
+        error("get_exciton_ldos_spatial_gpu: reduce=:block is not supported for the exciton LDOS. " *
+              "Block averaging requires O(block_size) independent Chebyshev recursions per pixel, " *
+              "making it equivalent to computing every site. Use reduce=:point with num_avg for " *
+              "light spatial averaging. Block averaging is only available in MPO-based LDOS functions.")
+    reduce === :point ||
+        error("get_exciton_ldos_spatial_gpu: reduce must be :point, got $reduce.")
     _ensure_scale!(H)
     length(H.sites) == 2 * H.L ||
         error("get_exciton_ldos_spatial_gpu: H is not an exciton Hamiltonian (expected length(H.sites) == 2*H.L).")
@@ -2498,7 +2581,7 @@ function get_exciton_ldos_spatial_gpu(H::TBHamiltonian, Ncheb::Int, ω_phys_vals
 
     I_mpo_cpu = MPO(H.sites, "Id")
     Ham_n_cpu = (1 / H.scale) * +(H.mpo, (-H.center) * I_mpo_cpu; cutoff=cutoff)
-    Ham_n_gpu = _to_gpu_mpo(Ham_n_cpu)
+    Ham_n_gpu = _to_gpu_mpo(Ham_n_cpu, gpu_type)
 
     ω_vals = (collect(ω_phys_vals) .- H.center) ./ H.scale
     Nω     = length(ω_vals)
@@ -2510,11 +2593,13 @@ function get_exciton_ldos_spatial_gpu(H::TBHamiltonian, Ncheb::Int, ω_phys_vals
     result       = zeros(Float64, Nω, nX)
     apply_kwargs = (cutoff=Float64(cutoff), maxdim=maxdim)
 
+    printinfo && println("  [gpu] exciton ldos dtype=$gpu_type")
+
     for (j, group) in enumerate(groups)
         last_linkdim = 0
 
         for X in group
-            psi0_gpu = _to_gpu_mps(mpsexciton(X, H.sites))
+            psi0_gpu = _to_gpu_mps(mpsexciton(X, H.sites), gpu_type)
             accum    = zeros(Float64, Nω)
 
             function kpm_step!(phi, n)
@@ -2592,9 +2677,11 @@ function get_exciton_cheb_convergence_gpu(H::TBHamiltonian, X::Int, Ncheb_max::I
                                            maxdim_test::Int  = 100,
                                            maxdim_ref::Int   = 500,
                                            cutoff::Real      = 1e-4,
+                                           type::Type{<:Number} = ComplexF32,
+                                           dtype::Union{Nothing,Type{<:Number}} = nothing,
                                            printinfo::Bool   = false)
     _check_gpu("get_exciton_cheb_convergence_gpu")
-    cutoff < 1e-6 && @warn "get_exciton_cheb_convergence_gpu: cutoff=$cutoff is below 1e-6; ComplexF32 may produce NaN — consider cutoff ≥ 1e-4."
+    gpu_type = _resolve_gpu_type("get_exciton_cheb_convergence_gpu", type, dtype, cutoff)
     length(H.sites) == 2 * H.L ||
         error("get_exciton_cheb_convergence_gpu: H is not an exciton Hamiltonian (expected length(H.sites) == 2*H.L).")
     1 <= X <= H.N ||
@@ -2606,9 +2693,9 @@ function get_exciton_cheb_convergence_gpu(H::TBHamiltonian, X::Int, Ncheb_max::I
 
     I_mpo_cpu  = MPO(H.sites, "Id")
     Ham_n_cpu  = (1 / H.scale) * +(H.mpo, (-H.center) * I_mpo_cpu; cutoff=Float64(cutoff))
-    Ham_n_gpu  = _to_gpu_mpo(Ham_n_cpu)
+    Ham_n_gpu  = _to_gpu_mpo(Ham_n_cpu, gpu_type)
 
-    psi0_gpu   = _to_gpu_mps(mpsexciton(X, H.sites))
+    psi0_gpu   = _to_gpu_mps(mpsexciton(X, H.sites), gpu_type)
 
     ak_ref  = (cutoff=Float64(cutoff), maxdim=maxdim_ref)
     ak_test = (cutoff=Float64(cutoff), maxdim=maxdim_test)
@@ -2688,19 +2775,21 @@ end
     get_C_gpu(H::TBHamiltonian, xfunc=nothing, yfunc=nothing; kwargs...) -> Function
 
 GPU-accelerated real-space Chern marker.  Mirrors `get_C` exactly but runs all
-MPO×MPO products (projector assembly and C1–C4 construction) on GPU in F32.
+MPO×MPO products (projector assembly and C1–C4 construction) on GPU.
 
 Returns the same closure `C_at(uc::Int) -> ComplexF64` as `get_C`.
 
 # Key differences from `get_C`
-- All `apply`/`truncate!` operations run on GPU tensors (F32).
-- `cutoff` is passed directly; a warning is emitted if `cutoff < 1e-6` since
-  ComplexF32 eigendecompositions can produce NaN on large systems at tight cutoffs.
+- All `apply`/`truncate!` operations run on GPU tensors.
+- `dtype` (default `ComplexF32`) selects the GPU element type; the marker is
+  intrinsically complex, so only `ComplexF32` / `ComplexF64` are accepted. Use
+  `dtype=ComplexF64` to avoid NaN from ComplexF32 eigendecompositions on large
+  systems at tight cutoffs (a warning is emitted for `ComplexF32` + `cutoff < 1e-6`).
 - The projector is built on CPU first (via `_get_projector`), then moved to GPU.
   For method=:mcweeny this means the purification loop runs on GPU.
 - `sequential` mode is not supported (non-sequential quenched is always used).
 
-All keyword arguments are identical to `get_C`.
+All other keyword arguments are identical to `get_C`.
 """
 function get_C_gpu(H::TBHamiltonian, xfunc=nothing, yfunc=nothing;
                    method::Symbol   = :mcweeny,
@@ -2713,10 +2802,11 @@ function get_C_gpu(H::TBHamiltonian, xfunc=nothing, yfunc=nothing;
                    cutoff::Real     = 1e-8,
                    Nel              = nothing,
                    quenched::Bool   = true,
+                   dtype::Type{<:Complex} = ComplexF32,
                    printinfo::Bool  = false)
 
     _check_gpu("get_C_gpu")
-    cutoff < 1e-6 && @warn "get_C_gpu: cutoff=$cutoff is below 1e-6; ComplexF32 eigendecomposition may produce NaN on large systems — consider cutoff ≥ 1e-4."
+    gpu_type = _resolve_gpu_type("get_C_gpu", dtype, nothing, cutoff)
     Λ_val = Lambda !== nothing ? Float64(Lambda) : Float64(Λ)
     ak    = (cutoff=Float64(cutoff), maxdim=maxdim)
 
@@ -2753,7 +2843,7 @@ function get_C_gpu(H::TBHamiltonian, xfunc=nothing, yfunc=nothing;
     printinfo && println("[gpu] Building initial projector guess (CPU)...")
     _ensure_scale!(H)
     P0_cpu = purification_initial_guess(H; ϵF=fermi, maxdim=maxdim, cutoff=cutoff)
-    P = _to_gpu_mpo(P0_cpu)
+    P = _to_gpu_mpo(P0_cpu, gpu_type)
 
     if method == :mcweeny
         printinfo && println("[gpu] McWeeny purification on GPU...")
@@ -2800,14 +2890,14 @@ function get_C_gpu(H::TBHamiltonian, xfunc=nothing, yfunc=nothing;
         # KPM: use CPU projector, just move to GPU
         P_cpu = _get_projector(H; method=:KPM, fermi=fermi, Nchebychev=Nchebychev,
                                maxdim=maxdim, cutoff=cutoff)
-        P = _to_gpu_mpo(P_cpu)
+        P = _to_gpu_mpo(P_cpu, gpu_type)
     else
         error("get_C_gpu: unknown method :$method. Choose :mcweeny, :sp2, or :KPM")
     end
     printinfo && println("[gpu] Projector ready, maxlinkdim=$(maxlinkdim(P))")
 
     # ── Q = I − P on GPU ──────────────────────────────────────────────────────
-    I_gpu = _to_gpu_mpo(MPO(collect(sites), "Id"))
+    I_gpu = _to_gpu_mpo(MPO(collect(sites), "Id"), gpu_type)
     Q = +(I_gpu, -1.0 * P; ak...)
     ITensorMPS.truncate!(Q; cutoff=Float64(cutoff))
     _gpu_gc!()
@@ -2819,26 +2909,26 @@ function get_C_gpu(H::TBHamiltonian, xfunc=nothing, yfunc=nothing;
             n_cell   = (alpha - 1) ÷ n_sub
             sub      = (alpha - 1) % n_sub + 1
             pos_bits = [((n_cell >> (L - i)) & 1) + 1 for i in 1:L]
-            _to_gpu_mps(_product_state_mps(all_sites, [pos_bits; sub]))
+            _to_gpu_mps(_product_state_mps(all_sites, [pos_bits; sub]), gpu_type)
         end
     else
-        alpha -> _to_gpu_mps(binary_to_MPS(alpha - 1, L, collect(sites)))
+        alpha -> _to_gpu_mps(binary_to_MPS(alpha - 1, L, collect(sites)), gpu_type)
     end
 
     if quenched
         # ── position operators on GPU ──────────────────────────────────────────
         sinX_gpu = _to_gpu_mpo(has_sub ?
             postpend_op(get_sinx_op(L, pos_sites, L_chain, Λ_val, xfunc_pos), sub_s, I_mat) :
-            get_sinx_op(L, pos_sites, L_chain, Λ_val, xfunc_pos))
+            get_sinx_op(L, pos_sites, L_chain, Λ_val, xfunc_pos), gpu_type)
         cosX_gpu = _to_gpu_mpo(has_sub ?
             postpend_op(get_cosx_op(L, pos_sites, L_chain, Λ_val, xfunc_pos), sub_s, I_mat) :
-            get_cosx_op(L, pos_sites, L_chain, Λ_val, xfunc_pos))
+            get_cosx_op(L, pos_sites, L_chain, Λ_val, xfunc_pos), gpu_type)
         sinY_gpu = _to_gpu_mpo(has_sub ?
             postpend_op(get_siny_op(L, pos_sites, L_chain, Λ_val, yfunc_pos), sub_s, I_mat) :
-            get_siny_op(L, pos_sites, L_chain, Λ_val, yfunc_pos))
+            get_siny_op(L, pos_sites, L_chain, Λ_val, yfunc_pos), gpu_type)
         cosY_gpu = _to_gpu_mpo(has_sub ?
             postpend_op(get_cosy_op(L, pos_sites, L_chain, Λ_val, yfunc_pos), sub_s, I_mat) :
-            get_cosy_op(L, pos_sites, L_chain, Λ_val, yfunc_pos))
+            get_cosy_op(L, pos_sites, L_chain, Λ_val, yfunc_pos), gpu_type)
         printinfo && println("[gpu] Position operators on GPU.")
 
         # ── 8 intermediate MPO products ────────────────────────────────────────
@@ -2901,8 +2991,8 @@ function get_C_gpu(H::TBHamiltonian, xfunc=nothing, yfunc=nothing;
         y_op = has_sub ?
             postpend_op(get_diagonal_mpo(L, pos_sites, i -> yfunc_pos(i-1, L_chain)), sub_s, I_mat) :
             get_diagonal_mpo(L, pos_sites, i -> yfunc_pos(i-1, L_chain))
-        x_gpu = _to_gpu_mpo(x_op)
-        y_gpu = _to_gpu_mpo(y_op)
+        x_gpu = _to_gpu_mpo(x_op, gpu_type)
+        y_gpu = _to_gpu_mpo(y_op, gpu_type)
 
         T1 = apply(Q, apply(x_gpu, apply(P, apply(y_gpu, Q; ak...); ak...); ak...); ak...)
         T2 = apply(P, apply(x_gpu, apply(Q, apply(y_gpu, P; ak...); ak...); ak...); ak...)
@@ -3041,8 +3131,11 @@ function scf_magnetic_hubbard_gpu(H0::TBHamiltonian, U::Union{Number, MPO};
                                   cutoff::Real = 1e-8,
                                   purif_maxiter::Int = 40,
                                   purif_tol::Real = 1e-6,
+                                  type::Type{<:Number} = ComplexF32,
+                                  dtype::Union{Nothing,Type{<:Number}} = nothing,
                                   verbose::Bool = true)
     _check_gpu("scf_magnetic_hubbard_gpu")
+    gpu_type = _resolve_gpu_type("scf_magnetic_hubbard_gpu", type, dtype, cutoff)
     cutoff < 1e-5 && @warn "scf_magnetic_hubbard_gpu: cutoff=$cutoff is below 1e-5; ComplexF32 eigen-decomposition may produce NaN — consider cutoff ≥ 1e-5."
 
     H0_up, H0_dn = _split_spin_channels(H0)
@@ -3060,13 +3153,13 @@ function scf_magnetic_hubbard_gpu(H0::TBHamiltonian, U::Union{Number, MPO};
         rho_up, rho_dn = initial_up, initial_dn
     end
 
-    rho_up_gpu = _to_gpu_mps(rho_up)
-    rho_dn_gpu = _to_gpu_mps(rho_dn)
-    bg_gpu = _to_gpu_mps(constant_mps(collect(sites), background))
-    H0_up_gpu = _to_gpu_mpo(H0_up.mpo)
-    H0_dn_gpu = _to_gpu_mpo(H0_dn.mpo)
-    Id_gpu = _to_gpu_mpo(MPO(collect(sites), "Id"))
-    U_gpu = U isa MPO ? _to_gpu_mpo(U) : nothing
+    rho_up_gpu = _to_gpu_mps(rho_up, gpu_type)
+    rho_dn_gpu = _to_gpu_mps(rho_dn, gpu_type)
+    bg_gpu = _to_gpu_mps(constant_mps(collect(sites), background), gpu_type)
+    H0_up_gpu = _to_gpu_mpo(H0_up.mpo, gpu_type)
+    H0_dn_gpu = _to_gpu_mpo(H0_dn.mpo, gpu_type)
+    Id_gpu = _to_gpu_mpo(MPO(collect(sites), "Id"), gpu_type)
+    U_gpu = U isa MPO ? _to_gpu_mpo(U, gpu_type) : nothing
 
     history = NamedTuple[]
     density_up_mpo_gpu = nothing
